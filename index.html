@@ -197,10 +197,34 @@
         </div>
         <p style="margin:.4em 0 0;font-size:.75rem;opacity:.55;text-align:center;" data-i18n="ui.localProcessingNote">All processing runs locally in your browser — no data is uploaded.</p>
       </section>
+	  
+	        <!-- Settings Presets -->
+      <section class="panel-section">
+        <h2>Settings Presets</h2>
+        <div class="preset-save-row">
+          <input type="text" id="preset-name-input" class="val" placeholder="Preset name…" style="flex:1;min-width:0;" />
+          <button id="preset-save-btn" class="upload-btn" style="white-space:nowrap;">Save</button>
+        </div>
+        <div class="preset-load-row" style="display:flex;gap:6px;margin-top:6px;">
+          <select id="preset-select" class="val" style="flex:1;min-width:0;">
+            <option value="">— select preset —</option>
+          </select>
+          <button id="preset-load-btn" class="upload-btn">Load</button>
+          <button id="preset-delete-btn" class="upload-btn">Delete</button>
+        </div>
+      </section>
+
+        <!-- Quick Bake button -->
+        <div class="export-buttons" style="margin-top:8px;">
+          <button id="bake-btn-quick" class="export-btn" disabled
+                  data-i18n="ui.bakeTextures"
+                  title="Apply the current texture to the mesh and reload the result as the working model.">Bake Textures</button>
+        </div>
 
       <!-- Displacement Map -->
       <section class="panel-section">
         <h2 data-i18n="sections.displacementMap">Displacement Map</h2>
+				
 
         <!-- Preset grid -->
         <div id="preset-grid" class="preset-grid">

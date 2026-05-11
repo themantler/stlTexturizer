@@ -114,6 +114,12 @@ const settings = {
   regularizeSecondPassMul:   1.1,
 };
 
+const presetNameInput  = document.getElementById('preset-name-input');
+const presetSelect     = document.getElementById('preset-select');
+const presetSaveBtn    = document.getElementById('preset-save-btn');
+const presetLoadBtn    = document.getElementById('preset-load-btn');
+const presetDeleteBtn  = document.getElementById('preset-delete-btn');
+
 // ── Canvas filter support (Safari / iOS WebView don't support ctx.filter) ────
 const CANVAS_FILTER_SUPPORTED = 'filter' in CanvasRenderingContext2D.prototype;
 
@@ -235,6 +241,7 @@ const exportProgPct    = document.getElementById('export-progress-pct');
 const exportProgLbl    = document.getElementById('export-progress-label');
 const triLimitWarning  = document.getElementById('tri-limit-warning');
 const bakeBtn          = document.getElementById('bake-btn');
+const bakeBtnQuick = document.getElementById('bake-btn-quick');
 const bakeMaskChk      = document.getElementById('bake-mask-chk');
 const bakeProgress     = document.getElementById('bake-progress');
 const bakeProgBar      = document.getElementById('bake-progress-bar');
@@ -1542,6 +1549,7 @@ function wireEvents() {
     advancedSection.classList.toggle('collapsed');
   });
   bakeBtn.addEventListener('click', bakeTextures);
+  if (bakeBtnQuick) bakeBtnQuick.addEventListener('click', bakeTextures);
 
   // ── Wireframe ──
   wireframeToggle.addEventListener('change', () => setWireframe(wireframeToggle.checked));
@@ -2328,6 +2336,7 @@ function handlePlaceOnFaceClick(e) {
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
   bakeBtn.disabled = (activeMapEntry === null);
+  if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
   updatePreview();
 
@@ -2827,6 +2836,7 @@ function loadDefaultCube() {
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
   bakeBtn.disabled = (activeMapEntry === null);
+  if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
   updatePreview();
 }
@@ -3844,6 +3854,7 @@ function updatePreview() {
     exportBtn.disabled = true;
     export3mfBtn.disabled = true;
     bakeBtn.disabled = true;
+	if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
     updateSmartResBtnState();
     return;
   }
@@ -3871,6 +3882,7 @@ function updatePreview() {
   exportBtn.disabled = false;
   export3mfBtn.disabled = false;
   bakeBtn.disabled = isBaking;
+  if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
 }
 
@@ -4811,6 +4823,7 @@ async function bakeTextures() {
   isBaking = true;
   bakeBtn.classList.add('busy');
   bakeBtn.disabled = true;
+  if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   bakeProgress.classList.remove('hidden');
 
   if (precisionMaskingEnabled) deactivatePrecisionMasking();
@@ -5184,6 +5197,7 @@ async function bakeTextures() {
     isBaking = false;
     bakeBtn.classList.remove('busy');
     bakeBtn.disabled = (activeMapEntry === null);
+	if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   }
 }
 
@@ -5305,6 +5319,7 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
   bakeBtn.disabled = (activeMapEntry === null);
+  if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
 
   updatePreview();
@@ -5494,6 +5509,106 @@ function _autoSaveSettings() {
     } catch { /* quota exceeded or disabled — ignore */ }
   }, 300);
 }
+
+// ── Settings Presets ──────────────────────────────────────────────────────────
+
+const PRESETS_STORAGE_KEY = 'stlt-setting-presets';
+
+function _loadPresetsFromStorage() {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function _savePresetsToStorage(presets) {
+  try { localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(presets)); }
+  catch { /* quota exceeded */ }
+}
+
+function _populatePresetDropdown(presets, selectName = null) {
+  presetSelect.innerHTML = '<option value="">— select preset —</option>';
+  for (const name of Object.keys(presets).sort()) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    presetSelect.appendChild(opt);
+  }
+  if (selectName) presetSelect.value = selectName;
+}
+
+// Extend PERSISTED_KEYS with regularize settings for presets
+const PRESET_KEYS = [
+  ...PERSISTED_KEYS,
+  'regularizeEnabled',
+  'regularizeAspectThreshold',
+  'regularizeSlack',
+  'regularizeAggressiveSlack',
+  'regularizeExtremeAspect',
+  'regularizeNormalDeg',
+  'regularizeAggressiveNormalDeg',
+  'regularizeSecondPassMul',
+];
+
+function _capturePresetSnapshot() {
+  const snap = {};
+  for (const k of PRESET_KEYS) snap[k] = settings[k];
+  return snap;
+}
+
+// Init — populate dropdown from localStorage
+_populatePresetDropdown(_loadPresetsFromStorage());
+
+presetSaveBtn.addEventListener('click', () => {
+  const name = (presetNameInput.value || '').trim();
+  if (!name) { presetNameInput.focus(); return; }
+  const presets = _loadPresetsFromStorage();
+  presets[name] = _capturePresetSnapshot();
+  _savePresetsToStorage(presets);
+  _populatePresetDropdown(presets, name);
+  presetNameInput.value = '';
+});
+
+presetLoadBtn.addEventListener('click', () => {
+  const name = presetSelect.value;
+  if (!name) return;
+  const presets = _loadPresetsFromStorage();
+  const snap = presets[name];
+  if (!snap) return;
+  applySettingsSnapshot(snap);
+  // Apply regularize settings not covered by applySettingsSnapshot
+  if (snap.regularizeEnabled != null) {
+    settings.regularizeEnabled = snap.regularizeEnabled;
+    regularizeEnabledChk.checked = snap.regularizeEnabled;
+    regularizeDebugRows.classList.toggle('disabled', !snap.regularizeEnabled);
+  }
+  const regMap = {
+    regularizeAspectThreshold: regAspectThresholdEl,
+    regularizeSlack:            regSlackEl,
+    regularizeAggressiveSlack:  regAggressiveSlackEl,
+    regularizeExtremeAspect:    regExtremeAspectEl,
+    regularizeNormalDeg:        regNormalDegEl,
+    regularizeAggressiveNormalDeg: regAggressiveNormalDegEl,
+    regularizeSecondPassMul:    regSecondPassMulEl,
+  };
+  for (const [key, el] of Object.entries(regMap)) {
+    if (snap[key] != null && el) {
+      el.value = snap[key];
+      settings[key] = snap[key];
+    }
+  }
+  updatePreview();
+});
+
+presetDeleteBtn.addEventListener('click', () => {
+  const name = presetSelect.value;
+  if (!name) return;
+  if (!confirm(`Delete preset "${name}"?`)) return;
+  const presets = _loadPresetsFromStorage();
+  delete presets[name];
+  _savePresetsToStorage(presets);
+  _populatePresetDropdown(presets);
+});
 
 function _restoreSessionSettings() {
   let raw;
