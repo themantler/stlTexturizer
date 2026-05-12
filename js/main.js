@@ -5672,6 +5672,8 @@ const PRESET_KEYS = [
   'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
   'regularizeSecondPassMul',
+  'fixedWorldTextureScale',
+  'referenceExtentMm',
 ];
 
 function _capturePresetSnapshot() {
@@ -5715,6 +5717,16 @@ presetLoadBtn.addEventListener('click', () => {
     regularizeAggressiveNormalDeg: regAggressiveNormalDegEl,
     regularizeSecondPassMul:    regSecondPassMulEl,
   };
+	  // Apply world texture scale settings
+	if (snap.fixedWorldTextureScale != null && fixedWorldTextureToggle) {
+	  settings.fixedWorldTextureScale = snap.fixedWorldTextureScale;
+	  fixedWorldTextureToggle.checked = snap.fixedWorldTextureScale;
+	  refreshReferenceExtentUi();
+	}
+	if (snap.referenceExtentMm != null && referenceExtentMmVal) {
+	  settings.referenceExtentMm = snap.referenceExtentMm;
+	  referenceExtentMmVal.value = snap.referenceExtentMm;
+	}
   for (const [key, el] of Object.entries(regMap)) {
     if (snap[key] != null && el) {
       el.value = snap[key];
