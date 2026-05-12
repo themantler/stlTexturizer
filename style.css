@@ -521,12 +521,10 @@ main {
   overflow: hidden;
   cursor: pointer;
   border: 2px solid transparent;
-  transition: border-color 0.15s, transform 0.1s;
   transition: border-color 0.15s;
   position: relative;
 }
 
-.preset-swatch:hover { border-color: var(--text-muted); transform: scale(1.04); }
 .preset-swatch:hover { border-color: var(--text-muted); }
 .preset-swatch.active { border-color: var(--accent); }
 

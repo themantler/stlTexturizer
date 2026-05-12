@@ -124,8 +124,6 @@ export function computeUV(pos, normal, mode, settings, bounds) {
   const rotRad = (settings.rotation ?? 0) * Math.PI / 180;
   const cosR = Math.cos(rotRad);
   const sinR = Math.sin(rotRad);
-  const maxDim = Math.max(size.x, size.y, size.z);
-  const md     = Math.max(maxDim, 1e-6);
   const md = getReferenceExtent(settings, bounds);
 
   let u = 0, v = 0;

@@ -1372,22 +1372,10 @@ function wireEvents() {
   });
 
   // ── Custom texture upload ──
-  textureInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
    textureInput.addEventListener('change', async (e) => {
     const files = [...e.target.files];
     if (!files.length) return;
     try {
-      activeMapEntry = await loadCustomTexture(file);
-      activeMapEntry.isCustom = true;
-      _lastCustomMap = activeMapEntry;
-      activeMapName.textContent = file.name;
-      document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
-      _showCustomMapThumb(activeMapEntry);
-      customMapSwatch.classList.add('active');
-      resetTextureSmoothing();
-      updatePreview();
       let lastSwatch = null;
       for (const file of files) {
         if (customMaps.some(m => m.name === file.name && m.size === file.size)) continue;
@@ -1400,7 +1388,6 @@ function wireEvents() {
     } catch (err) {
       console.error('Failed to load texture:', err);
     }
-    // Reset the file input so re-uploading the same filename still triggers 'change'.
     textureInput.value = '';
   });
 
