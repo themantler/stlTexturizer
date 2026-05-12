@@ -32,6 +32,7 @@ let previewMaterial   = null;
 let isExporting       = false;
 let isBaking          = false;
 let previewDebounce   = null;
+let customMaps = [];
 
 // Boundary edge data texture for per-fragment falloff in bump-only preview
 let _boundaryEdgeTex   = null;
@@ -89,6 +90,10 @@ const settings = {
   capAngle:         20,
   boundaryFalloff:  0,
   symmetricDisplacement: false,
+   /** When true, UV normalization uses referenceExtentMm instead of each mesh's largest bbox edge. */
+  fixedWorldTextureScale: false,
+  /** Millimetres: one normalized UV span along an axis (before Scale U/V). */
+  referenceExtentMm: 200,
   noDownwardZ: false,
   smoothBottom: true,
   useDisplacement: false,
@@ -119,6 +124,7 @@ const presetSelect     = document.getElementById('preset-select');
 const presetSaveBtn    = document.getElementById('preset-save-btn');
 const presetLoadBtn    = document.getElementById('preset-load-btn');
 const presetDeleteBtn  = document.getElementById('preset-delete-btn');
+const textureGroupTabs = document.getElementById('texture-group-tabs');
 
 // ── Canvas filter support (Safari / iOS WebView don't support ctx.filter) ────
 const CANVAS_FILTER_SUPPORTED = 'filter' in CanvasRenderingContext2D.prototype;
@@ -310,6 +316,16 @@ const boundaryFalloffSlider    = document.getElementById('boundary-falloff');
 const boundaryFalloffVal       = document.getElementById('boundary-falloff-val');
 const symmetricDispToggle    = document.getElementById('symmetric-displacement');
 const dispPreviewToggle      = document.getElementById('displacement-preview');
+const fixedWorldTextureToggle = document.getElementById('fixed-world-texture');
+const referenceExtentRow      = document.getElementById('reference-extent-row');
+const referenceExtentMmVal    = document.getElementById('reference-extent-mm');
+
+function refreshReferenceExtentUi() {
+  if (referenceExtentRow) {
+    referenceExtentRow.style.display = settings.fixedWorldTextureScale ? '' : 'none';
+  }
+}
+
 const noDownwardZChk         = document.getElementById('no-downward-z-chk');
 const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
 const regularizeEnabledChk   = document.getElementById('regularize-enabled-chk');
@@ -980,6 +996,8 @@ scaleVVal.value = posToScale(parseFloat(scaleVSlider.value));
 // Load geometry immediately — don't wait for textures
 loadDefaultCube();
 
+refreshReferenceExtentUi();
+
 // Build swatches with placeholder canvases, then load thumbnails
 const DEFAULT_PRESET_NAME = 'Crystal';
 const _presetSwatches = IMAGE_PRESETS.map((p, idx) => {
@@ -1022,6 +1040,7 @@ loadAllThumbnails().then(thumbs => {
     swatch.classList.remove('preset-loading');
     const placeholder = swatch.querySelector('canvas');
     swatch.replaceChild(thumb.thumbCanvas, placeholder);
+	_buildGroupTabs();
   });
 
   let persistedName = null;
@@ -1047,10 +1066,49 @@ loadAllThumbnails().then(thumbs => {
 
 // ── Preset grid ───────────────────────────────────────────────────────────────
 
+function addCustomSwatch(entry) {
+  const swatch = document.createElement('div');
+  swatch.className = 'preset-swatch custom-swatch';
+  swatch.title = entry.name;
+  swatch.appendChild(entry.thumbCanvas);
+  const label = document.createElement('span');
+  label.className = 'preset-label';
+  label.textContent = entry.name;
+  swatch.appendChild(label);
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'custom-swatch-remove';
+  removeBtn.textContent = '\u00d7';
+  removeBtn.title = 'Remove';
+  removeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const idx = customMaps.indexOf(entry);
+    if (idx !== -1) customMaps.splice(idx, 1);
+    swatch.remove();
+    if (activeMapEntry === entry) {
+      activeMapEntry = null;
+      activeMapName.textContent = t('ui.noMapSelected');
+      updatePreview();
+    }
+  });
+  swatch.appendChild(removeBtn);
+  swatch.addEventListener('click', () => selectCustomMap(entry, swatch));
+  presetGrid.appendChild(swatch);
+  return swatch;
+}
+
 function resetTextureSmoothing() {
   settings.textureSmoothing = 0;
   textureSmoothingSlider.value = 0;
   textureSmoothingVal.value    = 0;
+}
+
+function selectCustomMap(entry, swatchEl) {
+  document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
+  swatchEl.classList.add('active');
+  activeMapEntry = entry;
+  activeMapName.textContent = entry.name;
+  resetTextureSmoothing();
+  updatePreview();
 }
 
 let _selectGeneration = 0;   // debounce rapid preset clicks
@@ -1088,6 +1146,48 @@ async function selectPreset(idx, swatchEl, applyDefaults = true) {
     console.error('Failed to load full texture:', err);
     swatchEl.classList.remove('preset-loading-full');
   }
+}
+
+// ── Texture group tabs ────────────────────────────────────────────────────────
+
+let _activeTextureGroup = '__all__';
+
+function _buildGroupTabs() {
+  if (!textureGroupTabs) return;
+  // Collect unique groups from IMAGE_PRESETS preserving order
+  const groups = ['__all__'];
+  for (const p of IMAGE_PRESETS) {
+    const g = p.group || 'Built-in';
+    if (!groups.includes(g)) groups.push(g);
+  }
+  textureGroupTabs.innerHTML = '';
+  for (const g of groups) {
+    const btn = document.createElement('button');
+    btn.className = 'group-tab' + (g === _activeTextureGroup ? ' active' : '');
+    btn.dataset.group = g;
+    btn.textContent = g === '__all__' ? 'All' : g;
+    btn.addEventListener('click', () => _selectTextureGroup(g));
+    textureGroupTabs.appendChild(btn);
+  }
+}
+
+function _selectTextureGroup(group) {
+  _activeTextureGroup = group;
+  // Update tab active states
+  textureGroupTabs.querySelectorAll('.group-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.group === group);
+  });
+  // Show/hide swatches
+  _presetSwatches.forEach((swatch, idx) => {
+    if (!swatch) return;
+    const presetGroup = IMAGE_PRESETS[idx]?.group || 'Built-in';
+    const show = group === '__all__' || presetGroup === group;
+    swatch.style.display = show ? '' : 'none';
+  });
+  // Also show/hide custom swatches
+  document.querySelectorAll('.custom-swatch').forEach(swatch => {
+    swatch.style.display = (group === '__all__' || group === 'Custom') ? '' : 'none';
+  });
 }
 
 // ── Custom-map thumbnail (below the upload button) ───────────────────────────
@@ -1275,6 +1375,9 @@ function wireEvents() {
   textureInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+   textureInput.addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    if (!files.length) return;
     try {
       activeMapEntry = await loadCustomTexture(file);
       activeMapEntry.isCustom = true;
@@ -1285,6 +1388,15 @@ function wireEvents() {
       customMapSwatch.classList.add('active');
       resetTextureSmoothing();
       updatePreview();
+      let lastSwatch = null;
+      for (const file of files) {
+        if (customMaps.some(m => m.name === file.name && m.size === file.size)) continue;
+        const entry = await loadCustomTexture(file);
+        entry.size = file.size;
+        customMaps.push(entry);
+        lastSwatch = addCustomSwatch(entry);
+      }
+      if (lastSwatch) selectCustomMap(customMaps[customMaps.length - 1], lastSwatch);
     } catch (err) {
       console.error('Failed to load texture:', err);
     }
@@ -1372,6 +1484,31 @@ function wireEvents() {
       updatePreview();
     }
   });
+
+  if (fixedWorldTextureToggle) {
+    fixedWorldTextureToggle.addEventListener('change', () => {
+      settings.fixedWorldTextureScale = fixedWorldTextureToggle.checked;
+      refreshReferenceExtentUi();
+      clearTimeout(previewDebounce); previewDebounce = setTimeout(updatePreview, 80);
+    });
+  }
+
+  function applyReferenceExtentFromInput() {
+    if (!referenceExtentMmVal) return;
+    let v = parseFloat(referenceExtentMmVal.value);
+    if (!Number.isFinite(v)) v = settings.referenceExtentMm;
+    v = Math.max(0.1, Math.min(10000, v));
+    settings.referenceExtentMm = v;
+    referenceExtentMmVal.value = v;
+    clearTimeout(previewDebounce); previewDebounce = setTimeout(updatePreview, 80);
+  }
+  if (referenceExtentMmVal) {
+    referenceExtentMmVal.addEventListener('change', applyReferenceExtentFromInput);
+    addFineWheelSupport(referenceExtentMmVal, (v) => {
+      referenceExtentMmVal.value = v;
+      applyReferenceExtentFromInput();
+    });
+  }
 
   linkSlider(offsetUSlider,   offsetUVal,   v => { settings.offsetU   = v; return v.toFixed(2); });
   linkSlider(offsetVSlider,   offsetVVal,   v => { settings.offsetV   = v; return v.toFixed(2); });

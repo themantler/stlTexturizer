@@ -45,6 +45,56 @@ const IMAGE_PRESETS = [
   { name: 'Wood 1',       url: 'textures/wood.jpg',         thumb: 'textures/thumbs/wood.webp',         defaultScale: 0.5 },
   { name: 'Wood 2',       url: 'textures/woodgrain_02.jpg', thumb: 'textures/thumbs/woodgrain_02.webp', defaultScale: 1.0 },
   { name: 'Wood 3',       url: 'textures/woodgrain_03.jpg', thumb: 'textures/thumbs/woodgrain_03.webp', defaultScale: 1.0 },
+  { name: 'Basket',       url: 'textures/basket.png',       thumb: 'textures/thumbs/basket.webp',       defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Brick',        url: 'textures/brick.png',        thumb: 'textures/thumbs/brick.webp',        defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Bubble',       url: 'textures/bubble.png',       thumb: 'textures/thumbs/bubble.webp',       defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Carbon Fiber', url: 'textures/carbonFiber.jpg',  thumb: 'textures/thumbs/carbonFiber.webp',  defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Crystal',      url: 'textures/crystal.png',      thumb: 'textures/thumbs/crystal.webp',      defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Dots',         url: 'textures/dots.png',         thumb: 'textures/thumbs/dots.webp',         defaultScale: 0.1, group: 'Built-in' },
+  { name: 'Grid',         url: 'textures/grid.png',         thumb: 'textures/thumbs/grid.webp',         defaultScale: 1.0, group: 'Built-in' },
+  { name: 'Grip Surface', url: 'textures/gripSurface.jpg',  thumb: 'textures/thumbs/gripSurface.webp',  defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Hexagon',      url: 'textures/hexagon.jpg',      thumb: 'textures/thumbs/hexagon.webp',      defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Hexagons',     url: 'textures/hexagons.jpg',     thumb: 'textures/thumbs/hexagons.webp',     defaultScale: 1.0, group: 'Built-in' },
+  { name: 'Isogrid',      url: 'textures/isogrid.png',      thumb: 'textures/thumbs/isogrid.webp',      defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Knitting',     url: 'textures/knitting.png',     thumb: 'textures/thumbs/knitting.webp',     defaultScale: 0.25, group: 'Built-in' },
+  { name: 'Knurling',     url: 'textures/knurling.jpg',     thumb: 'textures/thumbs/knurling.webp',     defaultScale: 0.15, group: 'Built-in' },
+  { name: 'Leather 2',    url: 'textures/leather2.png',     thumb: 'textures/thumbs/leather2.webp',     defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Noise',        url: 'textures/noise.jpg',        thumb: 'textures/thumbs/noise.webp',        defaultScale: 0.3, group: 'Built-in' },
+  { name: 'Stripes 1',    url: 'textures/stripes.png',      thumb: 'textures/thumbs/stripes.webp',      defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Stripes 2',    url: 'textures/stripes_02.png',   thumb: 'textures/thumbs/stripes_02.webp',   defaultScale: 1.0, group: 'Built-in' },
+  { name: 'Voronoi',      url: 'textures/voronoi.jpg',      thumb: 'textures/thumbs/voronoi.webp',      defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Weave 1',      url: 'textures/weave.png',        thumb: 'textures/thumbs/weave.webp',        defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Weave 2',      url: 'textures/weave_02.jpg',     thumb: 'textures/thumbs/weave_02.webp',     defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Weave 3',      url: 'textures/weave_03.jpg',     thumb: 'textures/thumbs/weave_03.webp',     defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Wood 1',       url: 'textures/wood.jpg',         thumb: 'textures/thumbs/wood.webp',         defaultScale: 0.5, group: 'Built-in' },
+  { name: 'Wood 2',       url: 'textures/woodgrain_02.jpg', thumb: 'textures/thumbs/woodgrain_02.webp', defaultScale: 1.0, group: 'Built-in' },
+  { name: 'Wood 3',       url: 'textures/woodgrain_03.jpg', thumb: 'textures/thumbs/woodgrain_03.webp', defaultScale: 1.0, group: 'Built-in' },
+
+
+
+
+
+  {
+    name:  'Brick 1',
+    url:   'textures/HDCD_Brick-1.png',
+    thumb: 'textures/thumbs/HDCD_Brick-1.webp',
+    group: 'Hdcd',
+  },
+
+
+  {
+    name:  'Wood Siding',
+    url:   'textures/HDCD_Wood-Siding.png',
+    thumb: 'textures/thumbs/HDCD_Wood-Siding.webp',
+    group: 'Hdcd',
+  },
+
+  {
+    name:  'Brick 2',
+    url:   'textures/HDCD_Brick-2.jpg',
+    thumb: 'textures/thumbs/HDCD_Brick-2.webp',
+    group: 'Hdcd',
+  },
 ];
 
 // Cache for full-resolution preset data (keyed by index)
@@ -55,12 +105,26 @@ const _fullPresetCache = new Map();
  * Returns { name, thumbCanvas, defaultScale }.
  */
 function loadPresetThumbnail(preset) {
+  // Script-added preset with embedded base64 thumbnail
+  if (preset.thumbDataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const thumb = makeCanvas(THUMB);
+        thumb.getContext('2d').drawImage(img, 0, 0, THUMB, THUMB);
+        resolve({ name: preset.name, thumbCanvas: thumb, defaultScale: preset.defaultScale, group: preset.group });
+      };
+      img.onerror = () => reject(new Error(`Failed to load embedded thumbnail: ${preset.name}`));
+      img.src = preset.thumbDataUrl;
+    });
+  }
+  // Original format with external thumb file
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       const thumb = makeCanvas(THUMB);
       thumb.getContext('2d').drawImage(img, 0, 0, THUMB, THUMB);
-      resolve({ name: preset.name, thumbCanvas: thumb, defaultScale: preset.defaultScale });
+      resolve({ name: preset.name, thumbCanvas: thumb, defaultScale: preset.defaultScale, group: preset.group });
     };
     img.onerror = () => reject(new Error(`Failed to load thumbnail: ${preset.thumb}`));
     img.src = preset.thumb;
@@ -75,6 +139,8 @@ function loadPresetThumbnail(preset) {
 export function loadFullPreset(idx) {
   if (_fullPresetCache.has(idx)) return Promise.resolve(_fullPresetCache.get(idx));
   const preset = IMAGE_PRESETS[idx];
+  // Determine image source — script-added presets use file path, built-ins use url
+  const src = preset.url || `textures/${preset.file}`;
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -88,11 +154,12 @@ export function loadFullPreset(idx) {
       texture.name = preset.name;
 
       const entry = { name: preset.name, fullCanvas: full, texture, imageData, width: w, height: h, defaultScale: preset.defaultScale };
+      const entry = { name: preset.name, fullCanvas: full, texture, imageData, width: w, height: h, defaultScale: preset.defaultScale, group: preset.group };
       _fullPresetCache.set(idx, entry);
       resolve(entry);
     };
-    img.onerror = () => reject(new Error(`Failed to load preset image: ${preset.url}`));
-    img.src = preset.url;
+    img.onerror = () => reject(new Error(`Failed to load preset image: ${src}`));
+    img.src = src;
   });
 }
 
@@ -126,6 +193,13 @@ export function loadCustomTexture(file) {
       texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
       texture.name = file.name;
       resolve({ name: file.name, fullCanvas: canvas, texture, imageData, width: w, height: h });
+      const thumb = document.createElement('canvas');
+      thumb.width = 80; thumb.height = 80;
+      const tctx = thumb.getContext('2d');
+      const scale = Math.min(80 / img.width, 80 / img.height);
+      const dw = img.width * scale, dh = img.height * scale;
+      tctx.drawImage(img, (80 - dw) / 2, (80 - dh) / 2, dw, dh);
+      resolve({ name: file.name, thumbCanvas: thumb, fullCanvas: canvas, texture, imageData, width: w, height: h, isCustom: true });
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image')); };
     img.src = url;
