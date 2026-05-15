@@ -24,6 +24,7 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let currentGeometry   = null;   // original loaded geometry
+let _geometryWasRegularized = false;
 let currentBounds     = null;   // bounds of the original geometry
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
@@ -2979,6 +2980,7 @@ async function handleModelFile(file) {
     currentGeometry = geometry;
     currentBounds   = bounds;
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
+    _geometryWasRegularized = false; // reset when new model loaded
     checkAmplitudeWarning();
 
     // Log (but don't block the user with an alert) if bad triangles were
@@ -4605,7 +4607,7 @@ async function handleExport(format = 'stl') {
             ));
             if (exportToken !== myToken) return;
 
-            if (settings.regularizeEnabled) {
+            if (settings.regularizeEnabled && !body.wasRegularized) {
               setProgress(0.02 + frac * 0.93, t('progress.regularizing'));
               await yieldFrame();
               const reg = regularizeMesh(
@@ -4743,8 +4745,8 @@ async function handleExport(format = 'stl') {
       faceWeights
     ));
     if (exportToken !== myToken) return;
-
-    if (settings.regularizeEnabled) {
+	console.log('export regularize check:', settings.regularizeEnabled, _geometryWasRegularized);
+	if (settings.regularizeEnabled && !_geometryWasRegularized) {
       setProgress(0.30, t('progress.regularizing'));
       await yieldFrame();
       const reg = regularizeMesh(subdivided, new Int32Array(subdivided.attributes.position.count / 3), settings.refineLength, _regularizeOpts());
@@ -4981,7 +4983,7 @@ async function bakeTextures() {
       faceWeights
     ));
 
-    if (settings.regularizeEnabled) {
+    if (settings.regularizeEnabled && !_geometryWasRegularized) {
       setBakeProgress(0.36, t('progress.regularizing'));
       await yieldFrame();
       const reg = regularizeMesh(subdivided, faceParentId, settings.refineLength, _regularizeOpts());
@@ -5005,6 +5007,7 @@ async function bakeTextures() {
       }
       subdivided = resub;
       faceParentId = composed;
+	  _geometryWasRegularized = true;
     }
 
     const subTriCount = subdivided.attributes.position.count / 3;
@@ -5209,6 +5212,7 @@ async function bakeTextures() {
             bodyGeo, bodyRefineLength, null, bodyFaceWeights
           ));
 
+		  console.log(`body ${bi} (${body.name}): wasRegularized=${body.wasRegularized}, regularizeEnabled=${settings.regularizeEnabled}`);	
           if (settings.regularizeEnabled) {
             const reg = regularizeMesh(
               bodySubdivided,
@@ -5229,6 +5233,7 @@ async function bakeTextures() {
             }
             bodySubdivided = resub;
             bodyFaceParentId = composedBody;
+			body.wasRegularized = true;
           }
 
           bodyDisplaced = await runAsync(() =>
@@ -5337,6 +5342,7 @@ async function bakeTextures() {
 // touching the user's texture/settings. Mirrors the relevant subset of
 // handleModelFile but keeps activeMapEntry, settings, and refineLength as-is,
 // and seeds excludedFaces from opts.preExcludedFaces.
+
 function adoptBakedGeometry(geometry, bounds, opts = {}) {
   // Invalidate any in-flight async operations tied to the previous mesh.
   precisionToken++;
