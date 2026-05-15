@@ -1444,7 +1444,7 @@ function wireEvents() {
   scaleUSlider.addEventListener('input', () => applyScaleU(posToScale(parseFloat(scaleUSlider.value))));
   scaleUSlider.addEventListener('dblclick', () => applyScaleU(posToScale(parseFloat(scaleUSlider.defaultValue))));
   scaleUVal.addEventListener('change', () => applyScaleU(parseFloat(scaleUVal.value)));
-  addFineWheelSupport(scaleUVal, applyScaleU);
+  //addFineWheelSupport(scaleUVal, applyScaleU);
 
   // Scale V — when lock is on, mirror to U
   const applyScaleV = (v) => {
@@ -1458,7 +1458,7 @@ function wireEvents() {
   scaleVSlider.addEventListener('input', () => applyScaleV(posToScale(parseFloat(scaleVSlider.value))));
   scaleVSlider.addEventListener('dblclick', () => applyScaleV(posToScale(parseFloat(scaleVSlider.defaultValue))));
   scaleVVal.addEventListener('change', () => applyScaleV(parseFloat(scaleVVal.value)));
-  addFineWheelSupport(scaleVVal, applyScaleV);
+  //addFineWheelSupport(scaleVVal, applyScaleV);
 
   // Lock toggle
   lockScaleBtn.addEventListener('click', () => {
@@ -1492,7 +1492,7 @@ function wireEvents() {
   }
   if (referenceExtentMmVal) {
     referenceExtentMmVal.addEventListener('change', applyReferenceExtentFromInput);
-    addFineWheelSupport(referenceExtentMmVal, (v) => {
+      addFineWheelSupport(referenceExtentMmVal, (v) => {
       referenceExtentMmVal.value = v;
       applyReferenceExtentFromInput();
     });
@@ -1733,7 +1733,7 @@ function wireEvents() {
     exclBrushRadiusVal.value = diam;
     checkPrecisionOutdated();
   });
-  addFineWheelSupport(exclBrushRadiusVal, (v) => {
+    addFineWheelSupport(exclBrushRadiusVal, (v) => {
     const diam = Math.max(0.2, Math.min(100, v));
     brushRadius = diam / 2;
     exclBrushRadiusSlider.value = diam;
@@ -1758,7 +1758,7 @@ function wireEvents() {
     exclThresholdVal.value = bucketThreshold;
     _lastHoverTriIdx = -1;
   });
-  addFineWheelSupport(exclThresholdVal, (v) => {
+    addFineWheelSupport(exclThresholdVal, (v) => {
     bucketThreshold = Math.max(0, Math.min(180, v));
     exclThresholdSlider.value = bucketThreshold;
     exclThresholdVal.value = bucketThreshold;
@@ -2876,7 +2876,7 @@ function linkSlider(slider, valInput, onChangeFn, livePreview = true) {
       if (isNaN(raw)) { valInput.value = formatInputValue(valInput, parseFloat(slider.value)); return; }
       applyLinkedValue(raw);
     });
-    addFineWheelSupport(valInput, applyLinkedValue);
+    //addFineWheelSupport(valInput, applyLinkedValue);
   }
 }
 
