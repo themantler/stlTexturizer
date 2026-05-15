@@ -3991,8 +3991,12 @@ function updatePreview() {
       : currentGeometry;
 
   // Ensure faceMask attribute is current before rendering
-  updateFaceMask(activeGeo);
-
+  // Skip for very large meshes — too slow and painting tools are limited anyway
+  const _previewTriCount = activeGeo.attributes.position.count / 3;
+  if (_previewTriCount <= 4_000_000) {
+    updateFaceMask(activeGeo);
+  }
+  
   const effectiveEntry = getEffectiveMapEntry();
 
   if (!previewMaterial) {
@@ -5418,20 +5422,20 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
 
   // Build adjacency for the new geometry (needed by brush/bucket tools and
   // by the exclusion overlay).
+  console.log('adoptBaked: starting adjacency');
   const adjTriCount = geometry.attributes.position.count / 3;
+  console.log('adoptBaked: adjTriCount =', adjTriCount);
   const MAX_ADJ_TRIS = 4_000_000;
-  if (adjTriCount <= MAX_ADJ_TRIS) {
-    const adjData = buildAdjacency(geometry);
-    triangleAdjacency = adjData.adjacency;
-    triangleCentroids = adjData.centroids;
-    triangleFaceNormals = adjData.faceNormals;
-    updateMeshDiagnostics(adjData, adjTriCount);
-  } else {
-    triangleAdjacency  = null;
-    triangleCentroids  = null;
-    triangleFaceNormals = null;
-  }
+  triangleAdjacency   = null;
+  triangleCentroids   = null;
+  triangleFaceNormals = null;
 
+  if (excludedFaces.size > 0 && adjTriCount <= MAX_ADJ_TRIS) {
+    refreshExclusionOverlay();
+  } else {
+    setExclusionOverlay(null);
+  }
+  console.log('adoptBaked: overlay done');
   // Refresh exclusion overlay using the new geometry + new mask.
   if (excludedFaces.size > 0 && adjTriCount <= MAX_ADJ_TRIS) {
     refreshExclusionOverlay();
@@ -5459,12 +5463,16 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   bakeBtn.disabled = (activeMapEntry === null);
   if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
-
+  
+  console.log('adoptBaked: calling updatePreview');
   updatePreview();
+  console.log('adoptBaked: updatePreview done');
 
   // Bake is a destructive transform — undo history references the pre-bake
   // triangle set, so it's no longer meaningful.
+  console.log('adoptBaked: clearing undo');
   _clearUndoStacks();
+  console.log('adoptBaked: complete');
 }
 
 /**

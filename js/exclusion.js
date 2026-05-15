@@ -70,24 +70,28 @@ export function buildAdjacency(geometry) {
   // Vertex dedup using numeric spatial hash instead of string-keyed Map.
   // This avoids Map size limits and string allocation overhead for large meshes.
   const vertCount = triCount * 3;
-  const HASH_SIZE = 1 << 23; // 8M buckets
+  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(vertCount * 2)));
   const hashTable = new Int32Array(HASH_SIZE).fill(-1);
   const hashNext  = new Int32Array(vertCount).fill(-1);
   const vertId    = new Uint32Array(vertCount);
+  // Cache quantized coords to avoid repeated attribute lookups in probe chain
+  const qxArr = new Int32Array(vertCount);
+  const qyArr = new Int32Array(vertCount);
+  const qzArr = new Int32Array(vertCount);
   let nextId = 0;
 
   for (let i = 0; i < vertCount; i++) {
-    const x = Math.round(posAttr.getX(i) * QUANT);
-    const y = Math.round(posAttr.getY(i) * QUANT);
-    const z = Math.round(posAttr.getZ(i) * QUANT);
-    const h = (((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) >>> 0) & (HASH_SIZE - 1);
+    const qx = Math.round(posAttr.getX(i) * QUANT);
+    const qy = Math.round(posAttr.getY(i) * QUANT);
+    const qz = Math.round(posAttr.getZ(i) * QUANT);
+    qxArr[i] = qx; qyArr[i] = qy; qzArr[i] = qz;
+    const h = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
     let found = -1;
     let probe = hashTable[h];
     while (probe !== -1) {
-      const px = Math.round(posAttr.getX(probe) * QUANT);
-      const py = Math.round(posAttr.getY(probe) * QUANT);
-      const pz = Math.round(posAttr.getZ(probe) * QUANT);
-      if (px === x && py === y && pz === z) { found = probe; break; }
+      if (qxArr[probe] === qx && qyArr[probe] === qy && qzArr[probe] === qz) {
+        found = probe; break;
+      }
       probe = hashNext[probe];
     }
     if (found === -1) {
@@ -98,11 +102,10 @@ export function buildAdjacency(geometry) {
       vertId[i] = vertId[found];
     }
   }
-
+  
   // Build edge map using numeric keys — no string allocations
   // numEdgeKey produces a unique number for each undirected edge
   const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
-  const edgeMap = new Map();
   // Build edge map using typed array hash to avoid Map size limits
   const EDGE_HASH_SIZE = 1 << 23; // 8M buckets
   const edgeHashTable = new Int32Array(EDGE_HASH_SIZE).fill(-1);

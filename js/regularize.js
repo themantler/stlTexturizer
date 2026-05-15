@@ -98,16 +98,43 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   const pa = geometry.attributes.position.array;
   const triCount = pa.length / 9;
 
-  const posMap = new Map();
   const vertX = [], vertY = [], vertZ = [];
   let nextVid = 0;
   const corners = new Int32Array(triCount * 3);
+
+  // Numeric spatial hash to replace string-keyed Map
+  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
+  const hashTable = new Int32Array(HASH_SIZE).fill(-1);
+  const hashNext  = new Int32Array(triCount * 3).fill(-1);
+  let   hashSlot  = 0;
+
   for (let i = 0; i < triCount * 3; i++) {
     const x = pa[i*3], y = pa[i*3+1], z = pa[i*3+2];
-    const key = `${Math.round(x*QUANTISE)}_${Math.round(y*QUANTISE)}_${Math.round(z*QUANTISE)}`;
-    let id = posMap.get(key);
-    if (id === undefined) { id = nextVid++; posMap.set(key, id); vertX.push(x); vertY.push(y); vertZ.push(z); }
-    corners[i] = id;
+    const qx = Math.round(x * QUANTISE);
+    const qy = Math.round(y * QUANTISE);
+    const qz = Math.round(z * QUANTISE);
+    const h  = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
+    let found = -1;
+    let probe = hashTable[h];
+    while (probe !== -1) {
+      const pi = probe * 3;
+      if (Math.round(vertX[probe] * QUANTISE) === qx &&
+          Math.round(vertY[probe] * QUANTISE) === qy &&
+          Math.round(vertZ[probe] * QUANTISE) === qz) {
+        found = probe; break;
+      }
+      probe = hashNext[probe];
+    }
+    if (found === -1) {
+      hashNext[hashSlot] = hashTable[h];
+      hashTable[h]       = hashSlot;
+      vertX.push(x); vertY.push(y); vertZ.push(z);
+      corners[i] = nextVid;
+      hashSlot++;
+      nextVid++;
+    } else {
+      corners[i] = found;
+    }
   }
 
   // Per-triangle face normal (unit) + flag for deleted tris
@@ -170,7 +197,7 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
     const triThin2 = new Float32Array(triCount);
     for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);	  
 	// Replace Map with typed array hash to avoid Map size limits
-    const HASH_SIZE = 1 << 23; // 8M buckets
+    const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
     const edgeHashTable = new Int32Array(HASH_SIZE).fill(-1);
     const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
     const edgeHashKey   = new Float64Array(triCount * 3);
