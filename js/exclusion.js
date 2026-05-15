@@ -36,8 +36,7 @@ export function buildAdjacency(geometry) {
   // Pre-allocate face normals, centroids, and per-triangle bounding radii
   const faceNormals = new Float32Array(triCount * 3);
   const centroids   = new Float32Array(triCount * 3);
-  const boundRadii  = new Float32Array(triCount); // max vertex-to-centroid distance
-
+  const boundRadii  = new Float32Array(triCount);
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
@@ -50,15 +49,12 @@ export function buildAdjacency(geometry) {
     vA.fromBufferAttribute(posAttr, i);
     vB.fromBufferAttribute(posAttr, i + 1);
     vC.fromBufferAttribute(posAttr, i + 2);
-
     e1.subVectors(vB, vA);
     e2.subVectors(vC, vA);
     fn.crossVectors(e1, e2).normalize();
-
     faceNormals[i]     = fn.x;
     faceNormals[i + 1] = fn.y;
     faceNormals[i + 2] = fn.z;
-
     const cx = (vA.x + vB.x + vC.x) / 3;
     const cy = (vA.y + vB.y + vC.y) / 3;
     const cz = (vA.z + vB.z + vC.z) / 3;
@@ -71,47 +67,89 @@ export function buildAdjacency(geometry) {
     boundRadii[t] = Math.sqrt(Math.max(dA, dB, dC));
   }
 
-  // Build edge → triangle list (two triangles share an edge iff they share two
-  // vertex positions after quantization-based deduplication).
-  // Vertex-dedup pass: assign a numeric ID to each unique quantised position.
-  const posToId = new Map();
+  // Vertex dedup using numeric spatial hash instead of string-keyed Map.
+  // This avoids Map size limits and string allocation overhead for large meshes.
+  const vertCount = triCount * 3;
+  const HASH_SIZE = 1 << 23; // 8M buckets
+  const hashTable = new Int32Array(HASH_SIZE).fill(-1);
+  const hashNext  = new Int32Array(vertCount).fill(-1);
+  const vertId    = new Uint32Array(vertCount);
   let nextId = 0;
-  const vertId = new Uint32Array(triCount * 3);
-  for (let i = 0; i < triCount * 3; i++) {
-    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
-    const key = `${Math.round(x*QUANT)}_${Math.round(y*QUANT)}_${Math.round(z*QUANT)}`;
-    let id = posToId.get(key);
-    if (id === undefined) { id = nextId++; posToId.set(key, id); }
-    vertId[i] = id;
-  }
-  // nextId^2 < MAX_SAFE_INTEGER → safe up to ~94M unique vertices
-  const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
 
+  for (let i = 0; i < vertCount; i++) {
+    const x = Math.round(posAttr.getX(i) * QUANT);
+    const y = Math.round(posAttr.getY(i) * QUANT);
+    const z = Math.round(posAttr.getZ(i) * QUANT);
+    const h = (((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) >>> 0) & (HASH_SIZE - 1);
+    let found = -1;
+    let probe = hashTable[h];
+    while (probe !== -1) {
+      const px = Math.round(posAttr.getX(probe) * QUANT);
+      const py = Math.round(posAttr.getY(probe) * QUANT);
+      const pz = Math.round(posAttr.getZ(probe) * QUANT);
+      if (px === x && py === y && pz === z) { found = probe; break; }
+      probe = hashNext[probe];
+    }
+    if (found === -1) {
+      hashNext[i] = hashTable[h];
+      hashTable[h] = i;
+      vertId[i] = nextId++;
+    } else {
+      vertId[i] = vertId[found];
+    }
+  }
+
+  // Build edge map using numeric keys — no string allocations
+  // numEdgeKey produces a unique number for each undirected edge
+  const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
   const edgeMap = new Map();
-  const edgePairs = [0, 1, 0, 2, 1, 2]; // vertex-index pairs within triangle
+  // Build edge map using typed array hash to avoid Map size limits
+  const EDGE_HASH_SIZE = 1 << 23; // 8M buckets
+  const edgeHashTable = new Int32Array(EDGE_HASH_SIZE).fill(-1);
+  const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
+  const edgeHashKey   = new Float64Array(triCount * 3);
+  const edgeHashTriA  = new Int32Array(triCount * 3).fill(-1);
+  const edgeHashTriB  = new Int32Array(triCount * 3).fill(-1);
+  let edgeSlot = 0;
+  const edgePairs = [0, 1, 0, 2, 1, 2];
 
   for (let t = 0; t < triCount; t++) {
     const base = t * 3;
     for (let e = 0; e < 6; e += 2) {
-      const ek = numEdgeKey(vertId[base + edgePairs[e]], vertId[base + edgePairs[e + 1]]);
-      const entry = edgeMap.get(ek);
-      if (entry) entry.push(t);
-      else edgeMap.set(ek, [t]);
+      const a = vertId[base + edgePairs[e]];
+      const b = vertId[base + edgePairs[e + 1]];
+      const ek = a < b ? a * nextId + b : b * nextId + a;
+      const h = (Math.abs(Math.round(ek)) * 2654435761) >>> 0 & (EDGE_HASH_SIZE - 1);
+      let found = -1;
+      let probe = edgeHashTable[h];
+      while (probe !== -1) {
+        if (edgeHashKey[probe] === ek) { found = probe; break; }
+        probe = edgeHashNext[probe];
+      }
+      if (found === -1) {
+        edgeHashKey[edgeSlot]  = ek;
+        edgeHashTriA[edgeSlot] = t;
+        edgeHashTriB[edgeSlot] = -1;
+        edgeHashNext[edgeSlot] = edgeHashTable[h];
+        edgeHashTable[h]       = edgeSlot;
+        edgeSlot++;
+      } else if (edgeHashTriB[found] === -1) {
+        edgeHashTriB[found] = t;
+      }
+      // more than 2 triangles sharing an edge = non-manifold, ignore extras
     }
   }
 
-  // Convert edge map to adjacency list with per-edge dihedral angle
-  // Array from buildAdjacency
+  // Convert to adjacency list
   const adjacency = new Array(triCount);
   for (let t = 0; t < triCount; t++) adjacency[t] = [];
-
   let openEdgeCount = 0;
   let nonManifoldEdgeCount = 0;
 
-  for (const [, tris] of edgeMap) {
-    if (tris.length === 1) { openEdgeCount++; continue; }
-    if (tris.length > 2) nonManifoldEdgeCount++;
-    const [a, b] = tris;
+  for (let s = 0; s < edgeSlot; s++) {
+    const a = edgeHashTriA[s];
+    const b = edgeHashTriB[s];
+    if (b === -1) { openEdgeCount++; continue; }
     const nAx = faceNormals[a * 3], nAy = faceNormals[a * 3 + 1], nAz = faceNormals[a * 3 + 2];
     const nBx = faceNormals[b * 3], nBy = faceNormals[b * 3 + 1], nBz = faceNormals[b * 3 + 2];
     const dot      = Math.max(-1, Math.min(1, nAx * nBx + nAy * nBy + nAz * nBz));

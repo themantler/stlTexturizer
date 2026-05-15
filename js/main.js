@@ -5126,6 +5126,8 @@ async function bakeTextures() {
         const body    = bodies[bi];
         const bodyGeo = body.geometry;
         if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) continue;
+		// Force garbage collection before each body to clean up heap fragmentation
+		if (window.gc) window.gc();
 
         // Check if this body had any painted faces in the merged excludedFaces,
         // using original startTri before we updated it above.
@@ -5293,7 +5295,8 @@ async function bakeTextures() {
         } finally {
           if (bodySubdivided) bodySubdivided.dispose();
           if (bodyDisplaced)  bodyDisplaced.dispose();
-        }
+		  if (window.gc) window.gc();
+		}
 
         setBakeProgress(0.91 + (bi + 1) * perBodyFraction, t('progress.finalizing'));
         await yieldFrame();
@@ -5415,15 +5418,26 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
 
   // Build adjacency for the new geometry (needed by brush/bucket tools and
   // by the exclusion overlay).
-  const adjData = buildAdjacency(geometry);
-  triangleAdjacency = adjData.adjacency;
-  triangleCentroids = adjData.centroids;
-  triangleFaceNormals = adjData.faceNormals;
-  updateMeshDiagnostics(adjData, geometry.attributes.position.count / 3);
+  const adjTriCount = geometry.attributes.position.count / 3;
+  const MAX_ADJ_TRIS = 4_000_000;
+  if (adjTriCount <= MAX_ADJ_TRIS) {
+    const adjData = buildAdjacency(geometry);
+    triangleAdjacency = adjData.adjacency;
+    triangleCentroids = adjData.centroids;
+    triangleFaceNormals = adjData.faceNormals;
+    updateMeshDiagnostics(adjData, adjTriCount);
+  } else {
+    triangleAdjacency  = null;
+    triangleCentroids  = null;
+    triangleFaceNormals = null;
+  }
 
   // Refresh exclusion overlay using the new geometry + new mask.
-  if (excludedFaces.size > 0) refreshExclusionOverlay();
-  else setExclusionOverlay(null);
+  if (excludedFaces.size > 0 && adjTriCount <= MAX_ADJ_TRIS) {
+    refreshExclusionOverlay();
+  } else {
+    setExclusionOverlay(null);
+  }
   const maskCount = excludedFaces.size;
   exclCount.textContent = maskCount === 0
     ? t('excl.initExcluded')

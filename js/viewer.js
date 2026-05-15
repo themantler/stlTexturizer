@@ -439,6 +439,7 @@ export function initViewer(canvas) {
 
   function applySpaceMouse() {
     if (!controls.enabled) return;
+	if (document && !document.hasFocus()) return; // ignore input when window not focused
 
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let sm = null;

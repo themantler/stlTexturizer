@@ -168,18 +168,38 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   const frozenVert = new Uint8Array(nextVid);
   {
     const triThin2 = new Float32Array(triCount);
-    for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);
-    const edgeSeen = new Map(); // numeric key → first triangle index
+    for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);	  
+	// Replace Map with typed array hash to avoid Map size limits
+    const HASH_SIZE = 1 << 23; // 8M buckets
+    const edgeHashTable = new Int32Array(HASH_SIZE).fill(-1);
+    const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
+    const edgeHashKey   = new Float64Array(triCount * 3);
+    const edgeHashTri   = new Int32Array(triCount * 3);
+    let edgeSlot = 0;
     const edgeKey = (a, b) => a < b ? a * nextVid + b : b * nextVid + a;
     for (let t = 0; t < triCount; t++) {
       const a = corners[t*3], b = corners[t*3+1], c = corners[t*3+2];
       for (const [u, v] of [[a,b],[b,c],[c,a]]) {
         const k = edgeKey(u, v);
-        const other = edgeSeen.get(k);
-        if (other === undefined) { edgeSeen.set(k, t); continue; }
-        if (triThin2[t] > extremeAspect2 || triThin2[other] > extremeAspect2) continue;
-        const dot = triNrmX[t]*triNrmX[other] + triNrmY[t]*triNrmY[other] + triNrmZ[t]*triNrmZ[other];
-        if (dot < sharpEdgeCos) { frozenVert[u] = 1; frozenVert[v] = 1; }
+        const h = (Math.abs(Math.round(k)) * 2654435761) >>> 0 & (HASH_SIZE - 1);
+        let found = -1;
+        let probe = edgeHashTable[h];
+        while (probe !== -1) {
+          if (edgeHashKey[probe] === k) { found = probe; break; }
+          probe = edgeHashNext[probe];
+        }
+        if (found === -1) {
+          edgeHashKey[edgeSlot]  = k;
+          edgeHashTri[edgeSlot]  = t;
+          edgeHashNext[edgeSlot] = edgeHashTable[h];
+          edgeHashTable[h]       = edgeSlot;
+          edgeSlot++;
+        } else {
+          const other = edgeHashTri[found];
+          if (triThin2[t] > extremeAspect2 || triThin2[other] > extremeAspect2) continue;
+          const dot = triNrmX[t]*triNrmX[other] + triNrmY[t]*triNrmY[other] + triNrmZ[t]*triNrmZ[other];
+          if (dot < sharpEdgeCos) { frozenVert[u] = 1; frozenVert[v] = 1; }
+        }
       }
     }
   }

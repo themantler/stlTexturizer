@@ -1,17 +1,32 @@
 import { zipSync, strToU8 } from 'fflate';
 
-function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
-  const blob = new Blob([buffer], { type: mime });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href=url; a.download=filename; a.style.display='none';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
+async function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
+  if (window.electronAPI) {
+    const result = await window.electronAPI.showSaveDialog({
+      defaultPath: filename,
+      filters: [
+        { name: '3MF Files', extensions: ['3mf'] },
+        { name: 'STL Files', extensions: ['stl'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    })
+    if (!result.canceled && result.filePath) {
+      await window.electronAPI.writeFile(result.filePath, buffer)
+    }
+    return
+  }
+  // Fall back to browser download
+  const blob = new Blob([buffer], { type: mime })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href=url; a.download=filename; a.style.display='none'
+  document.body.appendChild(a); a.click(); document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
 // ── STL exporter ─────────────────────────────────────────────────────────────
 
-export function exportSTL(geometry, filename = 'textured.stl') {
+export async function exportSTL(geometry, filename = 'textured.stl') {
   const posArr = geometry.attributes.position.array;
   const norArr = geometry.attributes.normal ? geometry.attributes.normal.array : null;
   const triCount = (posArr.length / 9) | 0;
@@ -37,7 +52,7 @@ export function exportSTL(geometry, filename = 'textured.stl') {
     }
     bytes.set(posSrc.subarray(srcOff, srcOff+36), dst+12);
   }
-  triggerDownload(buffer, filename);
+  await triggerDownload(buffer, filename);
 }
 
 // ── 3MF body metadata ─────────────────────────────────────────────────────────
@@ -90,34 +105,74 @@ function emitObjectXml(emitter, geometry, objectId, name) {
   const triCount = (posArr.length / 9) | 0;
   if (triCount === 0) return;
 
-  const indexMap = new Map();
-  const xyz      = [];
-  const triIdx   = new Uint32Array(triCount * 3);
+  const vertCount_max = triCount * 3;
+  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
+  const hashTable  = new Int32Array(HASH_SIZE).fill(-1);
+  const hashNext   = new Int32Array(vertCount_max).fill(-1);
+  const hashX      = new Float32Array(vertCount_max);
+  const hashY      = new Float32Array(vertCount_max);
+  const hashZ      = new Float32Array(vertCount_max);
+  const hashIdx    = new Int32Array(vertCount_max);
+  let   slotCount  = 0;
+  let   vertCount  = 0;
+  const QUANT_LOCAL = 1e4;
+  const triIdx = new Uint32Array(triCount * 3);
 
-  for (let i=0; i<triCount; i++) {
-    for (let j=0; j<3; j++) {
-      const b=i*9+j*3;
-      const x=posArr[b], y=posArr[b+1], z=posArr[b+2];
-      if (!isFinite(x)||!isFinite(y)||!isFinite(z))
+  for (let i = 0; i < triCount; i++) {
+    for (let j = 0; j < 3; j++) {
+      const b = i * 9 + j * 3;
+      const x = posArr[b], y = posArr[b+1], z = posArr[b+2];
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z))
         throw new Error(`Non-finite vertex in body ${objectId} tri ${i} vert ${j}: (${x},${y},${z})`);
-      const key=x.toFixed(4)+','+y.toFixed(4)+','+z.toFixed(4);
-      let idx=indexMap.get(key);
-      if (idx===undefined) { idx=xyz.length/3; xyz.push(x,y,z); indexMap.set(key,idx); }
-      triIdx[i*3+j]=idx;
+      const qx = Math.round(x * QUANT_LOCAL);
+      const qy = Math.round(y * QUANT_LOCAL);
+      const qz = Math.round(z * QUANT_LOCAL);
+      const h  = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
+      let found = -1;
+      let probe = hashTable[h];
+      while (probe !== -1) {
+        if (Math.round(hashX[probe] * QUANT_LOCAL) === qx &&
+            Math.round(hashY[probe] * QUANT_LOCAL) === qy &&
+            Math.round(hashZ[probe] * QUANT_LOCAL) === qz) {
+          found = probe; break;
+        }
+        probe = hashNext[probe];
+      }
+      if (found === -1) {
+        hashX[slotCount]    = x;
+        hashY[slotCount]    = y;
+        hashZ[slotCount]    = z;
+        hashIdx[slotCount]  = vertCount;
+        hashNext[slotCount] = hashTable[h];
+        hashTable[h]        = slotCount;
+        triIdx[i * 3 + j]   = vertCount;
+        slotCount++;
+        vertCount++;
+      } else {
+        triIdx[i * 3 + j] = hashIdx[found];
+      }
     }
   }
 
-  const vertCount=xyz.length/3;
-  const namePart=name ? ` name="${escapeXml(name)}"` : '';
+  const vx = new Float32Array(vertCount);
+  const vy = new Float32Array(vertCount);
+  const vz = new Float32Array(vertCount);
+  for (let s = 0; s < slotCount; s++) {
+    const idx = hashIdx[s];
+    vx[idx] = hashX[s];
+    vy[idx] = hashY[s];
+    vz[idx] = hashZ[s];
+  }
+
+  const namePart = name ? ` name="${escapeXml(name)}"` : '';
   emit(`<object id="${objectId}"${namePart} type="model">\n<mesh>\n<vertices>\n`);
-  for (let i=0;i<vertCount;i++) {
-    const b=i*3;
-    emit('<vertex x="'+fmt4(xyz[b])+'" y="'+fmt4(xyz[b+1])+'" z="'+fmt4(xyz[b+2])+'"/>\n');
+  for (let i = 0; i < vertCount; i++) {
+    emit('<vertex x="' + fmt4(vx[i]) + '" y="' + fmt4(vy[i]) + '" z="' + fmt4(vz[i]) + '"/>\n');
   }
   emit('</vertices>\n<triangles>\n');
-  for (let i=0;i<triCount;i++) {
-    const b=i*3;
-    emit('<triangle v1="'+triIdx[b]+'" v2="'+triIdx[b+1]+'" v3="'+triIdx[b+2]+'"/>\n');
+  for (let i = 0; i < triCount; i++) {
+    const b = i * 3;
+    emit('<triangle v1="' + triIdx[b] + '" v2="' + triIdx[b+1] + '" v3="' + triIdx[b+2] + '"/>\n');
   }
   emit('</triangles>\n</mesh>\n</object>\n');
 }
@@ -143,22 +198,18 @@ function buildTransformAttr(matrix, centerOffset) {
     .map(v=>parseFloat((isFinite(v)?v:0).toFixed(6))).join(' ');
 }
 
-// ── Core 3MF byte builder (no download) ──────────────────────────────────────
-// Used by both export3MF (adds download) and project save (_bodiesToRaw3MF).
+// ── 3MF XML builder ───────────────────────────────────────────────────────────
 
-export function build3MFBytes(bodyResultsOrGeometry) {
+function buildModelXmlBytes(bodyResultsOrGeometry) {
   const emitter = makeEmitter();
   const { emit, finish } = emitter;
-
   emit(
     '<?xml version="1.0" encoding="UTF-8"?>\n'+
     '<model unit="millimeter" xml:lang="en-US" '+
     'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'+
     '<resources>\n'
   );
-
   const isMultiBody = Array.isArray(bodyResultsOrGeometry) && bodyResultsOrGeometry.length > 0;
-
   if (isMultiBody) {
     const bodyResults = bodyResultsOrGeometry;
     const nonEmpty = bodyResults.filter(b => (b.geometry.attributes.position.array.length/9|0) > 0);
@@ -183,32 +234,47 @@ export function build3MFBytes(bodyResultsOrGeometry) {
     emit(txAttr ? `<item objectid="1" transform="${txAttr}"/>\n` : '<item objectid="1"/>\n');
     emit('</build>\n</model>\n');
   }
-
-  const modelBytes = finish();
-
-  const contentTypesXml =
-    '<?xml version="1.0" encoding="UTF-8"?>\n'+
-    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'+
-    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'+
-    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n'+
-    '</Types>\n';
-  const relsXml =
-    '<?xml version="1.0" encoding="UTF-8"?>\n'+
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'+
-    '<Relationship Id="rel-1" Target="/3D/3dmodel.model" '+
-    'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'+
-    '</Relationships>\n';
-
-  return zipSync({
-    '[Content_Types].xml': strToU8(contentTypesXml),
-    '_rels/.rels':         strToU8(relsXml),
-    '3D/3dmodel.model':    modelBytes,
-  }, { level:6 });
+  return finish();
 }
 
-// ── Public 3MF exporter (builds bytes then triggers download) ─────────────────
+const CONTENT_TYPES_XML =
+  '<?xml version="1.0" encoding="UTF-8"?>\n'+
+  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'+
+  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'+
+  '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n'+
+  '</Types>\n';
 
-export function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf') {
-  const zipped = build3MFBytes(bodyResultsOrGeometry);
-  triggerDownload(zipped, filename, 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml');
+const RELS_XML =
+  '<?xml version="1.0" encoding="UTF-8"?>\n'+
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'+
+  '<Relationship Id="rel-1" Target="/3D/3dmodel.model" '+
+  'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'+
+  '</Relationships>\n';
+
+// Returns zipped 3MF bytes — used by project save
+export function build3MFBytes(bodyResultsOrGeometry) {
+  const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
+  return zipSync({
+    '[Content_Types].xml': strToU8(CONTENT_TYPES_XML),
+    '_rels/.rels':         strToU8(RELS_XML),
+    '3D/3dmodel.model':    modelBytes,
+  }, { level: 0 });
+}
+
+// Async export — doesn't block the thread
+export async function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf') {
+  const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
+  
+  // Use zipSync but defer to next tick to avoid blocking
+  const zipped = await new Promise((resolve) => {
+    setTimeout(() => {
+      resolve(zipSync({
+        '[Content_Types].xml': [strToU8(CONTENT_TYPES_XML), { level: 0 }],
+        '_rels/.rels':         [strToU8(RELS_XML),           { level: 0 }],
+        '3D/3dmodel.model':    [modelBytes,                  { level: 0 }],
+      }));
+    }, 0);
+  });
+  
+  await triggerDownload(zipped, filename, 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml');
 }
