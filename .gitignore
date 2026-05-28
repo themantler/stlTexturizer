@@ -6,3 +6,4 @@ package-lock.json
 debug_out/
 /*.stl
 test-*.mjs
+/textures

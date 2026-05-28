@@ -97,6 +97,7 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   // ── Build indexed mesh ──
   const pa = geometry.attributes.position.array;
   const triCount = pa.length / 9;
+  console.log('regularize: triCount =', triCount);	
 
   const vertX = [], vertY = [], vertZ = [];
   let nextVid = 0;
@@ -192,23 +193,32 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   // remains as the primary safeguard against feature damage.  Real CAD
   // features (cube edges, chamfers) are bordered by well-shaped tris on
   // each side and are unaffected.
-  const frozenVert = new Uint8Array(nextVid);
+const frozenVert = new Uint8Array(nextVid);
   {
     const triThin2 = new Float32Array(triCount);
-    for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);	  
-	// Replace Map with typed array hash to avoid Map size limits
+    for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);
     const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
+    const edgeHash = (k) => {
+      const lo = k % 2147483647;
+      const hi = Math.floor(k / 2147483647);
+      return (((lo * 2654435761) >>> 0) ^ ((hi * 2246822519) >>> 0)) & (HASH_SIZE - 1);
+    };
     const edgeHashTable = new Int32Array(HASH_SIZE).fill(-1);
     const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
     const edgeHashKey   = new Float64Array(triCount * 3);
-    const edgeHashTri   = new Int32Array(triCount * 3);
-    let edgeSlot = 0;
-    const edgeKey = (a, b) => a < b ? a * nextVid + b : b * nextVid + a;
+    const edgeHashTri   = new Int32Array(triCount * 3).fill(-2); // -2 = unused slot
+let edgeSlot = 0;
+    const edgeKey = (a, b) => {
+      const lo = a < b ? a : b;
+      const hi = a < b ? b : a;
+      const s = lo + hi;
+      return s * (s + 1) / 2 + hi;
+    };
     for (let t = 0; t < triCount; t++) {
       const a = corners[t*3], b = corners[t*3+1], c = corners[t*3+2];
       for (const [u, v] of [[a,b],[b,c],[c,a]]) {
         const k = edgeKey(u, v);
-        const h = (Math.abs(Math.round(k)) * 2654435761) >>> 0 & (HASH_SIZE - 1);
+        const h = edgeHash(k);
         let found = -1;
         let probe = edgeHashTable[h];
         while (probe !== -1) {
@@ -223,12 +233,19 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
           edgeSlot++;
         } else {
           const other = edgeHashTri[found];
+          edgeHashTri[found] = -1;
           if (triThin2[t] > extremeAspect2 || triThin2[other] > extremeAspect2) continue;
           const dot = triNrmX[t]*triNrmX[other] + triNrmY[t]*triNrmY[other] + triNrmZ[t]*triNrmZ[other];
           if (dot < sharpEdgeCos) { frozenVert[u] = 1; frozenVert[v] = 1; }
         }
       }
     }
+    let matchedSlots = 0, unmatchedSlots = 0;
+    for (let s = 0; s < edgeSlot; s++) {
+      if (edgeHashTri[s] === -1) matchedSlots++;
+      else if (edgeHashTri[s] !== -2) unmatchedSlots++;
+    }
+    console.log(`edge slots: total=${edgeSlot}, matched=${matchedSlots}, unmatched=${unmatchedSlots}`);
   }
 
   // helper: triangles that contain both u and v
@@ -303,6 +320,8 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
     }
     totalCollapses += roundCollapses;
     if (roundCollapses === 0) break;
+	console.log(`round ${round}: ${roundCollapses} collapses, ${candidates.length} candidates`);
+	console.log(`round ${round}: frozen=${rejectStats.frozen}, wingCount=${rejectStats.wingCount}, linkCondition=${rejectStats.linkCondition}, edgeCap=${rejectStats.edgeCap}, normalChange=${rejectStats.normalChange}`);
   }
 
   // ── Compact: drop deleted tris, build output buffers ──
@@ -393,11 +412,27 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   function tryCollapse(u, v) {
     if (u === v) return false;
 
-    // Sharp-edge vertices stay put — refuse the collapse outright.
-    if (frozenVert[u] || frozenVert[v]) { rejectStats.frozen++; return false; }
+    // Sharp-edge vertices: block collapse unless BOTH endpoints are frozen
+    // and they share a sharp edge — that means the collapse stays on the
+    // feature edge (slides along it) rather than crossing it.
+    // Wing triangles — must be exactly 2 (manifold interior edge).
+    // Computed here so the frozen-vertex check can reuse it when both
+    // endpoints are frozen, avoiding a redundant call.
+    const wings = trianglesSharingEdge(u, v);
+
+    if (frozenVert[u] || frozenVert[v]) {
+      if (frozenVert[u] && frozenVert[v]) {
+        if (wings.length !== 2) { rejectStats.frozen++; return false; }
+        const dot = triNrmX[wings[0]]*triNrmX[wings[1]]
+                  + triNrmY[wings[0]]*triNrmY[wings[1]]
+                  + triNrmZ[wings[0]]*triNrmZ[wings[1]];
+        if (dot >= sharpEdgeCos) { rejectStats.frozen++; return false; }
+      } else {
+        rejectStats.frozen++; return false;
+      }
+    }
 
     // Wing triangles — must be exactly 2 (manifold interior edge).
-    const wings = trianglesSharingEdge(u, v);
     if (wings.length !== 2) { rejectStats.wingCount++; return false; }
 
     const apexW1 = thirdVertex(wings[0], u, v);
@@ -424,10 +459,12 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
       if (vNeighbours.has(vn)) { rejectStats.linkCondition++; return false; }
     }
 
-    // Merged position: midpoint
-    const mx = (vertX[u] + vertX[v]) / 2;
-    const my = (vertY[u] + vertY[v]) / 2;
-    const mz = (vertZ[u] + vertZ[v]) / 2;
+    // Merged position: midpoint normally, but if both endpoints are frozen
+    // (collapsing along a sharp edge) snap to u to stay on the feature line.
+    const snapToU = frozenVert[u] && frozenVert[v];
+    const mx = snapToU ? vertX[u] : (vertX[u] + vertX[v]) / 2;
+    const my = snapToU ? vertY[u] : (vertY[u] + vertY[v]) / 2;
+    const mz = snapToU ? vertZ[u] : (vertZ[u] + vertZ[v]) / 2;
 
     // Affected triangles: all using u or v, excluding wings
     const affected = [];

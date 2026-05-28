@@ -250,6 +250,7 @@ const triLimitWarning  = document.getElementById('tri-limit-warning');
 const bakeBtn          = document.getElementById('bake-btn');
 const bakeBtnQuick = document.getElementById('bake-btn-quick');
 const bakeMaskChk      = document.getElementById('bake-mask-chk');
+const bakeAdjacencyChk     = document.getElementById('bake-build-adjacency-chk');
 const bakeProgress     = document.getElementById('bake-progress');
 const bakeProgBar      = document.getElementById('bake-progress-bar');
 const bakeProgPct      = document.getElementById('bake-progress-pct');
@@ -1808,6 +1809,10 @@ function wireEvents() {
       updateMaskingTriDebug(e);
       const triIdx = pickTriangle(e);
       if (triIdx >= 0) {
+        if (!triangleAdjacency) {
+          console.warn('Bucket fill unavailable — adjacency not built for this mesh');
+          return;
+        }
         const filled = bucketFill(triIdx, triangleAdjacency, bucketThreshold);
         // Bucket fill always uses original face indices
         for (const t of filled) {
@@ -2011,7 +2016,24 @@ function pickTriangle(e) {
   if (!mesh) return -1;
   _raycaster.setFromCamera(_canvasNDC(e), getCamera());
   const hits = _raycaster.intersectObject(mesh);
-  const hit = getFrontFaceHit(hits, mesh);
+  // Skip hits on triangles that have null adjacency (painted/excluded bodies)
+  // so clicks pass through to unpainted bodies behind them.
+  let hit = null;
+  for (const h of hits) {
+    let fi = h.faceIndex;
+    if (dispPreviewGeometry && mesh.geometry === dispPreviewGeometry && dispPreviewParentMap) {
+      fi = dispPreviewParentMap[fi];
+    }
+    if (precisionGeometry && mesh.geometry === precisionGeometry && precisionParentMap) {
+      fi = precisionParentMap[fi];
+    }
+    // Accept this hit if adjacency is available and non-null for this triangle,
+    // or if no adjacency filtering is active
+    if (!triangleAdjacency || triangleAdjacency[fi] !== null) {
+      hit = h;
+      break;
+    }
+  }
   if (!hit) return -1;
   let fi = hit.faceIndex;
   // When displacement preview is active the mesh uses the subdivided geometry,
@@ -4168,6 +4190,7 @@ function deactivatePrecisionMasking() {
     excludedFaces = precisionExcludedFaces;
 
     // Update mesh info display
+	const triCount = currentGeometry.attributes.position.count / 3;
     const mb = ((currentGeometry.attributes.position.array.byteLength) / 1024 / 1024).toFixed(2);
     const sx = currentBounds.size.x.toFixed(2);
     const sy = currentBounds.size.y.toFixed(2);
@@ -4745,7 +4768,7 @@ async function handleExport(format = 'stl') {
       faceWeights
     ));
     if (exportToken !== myToken) return;
-	console.log('export regularize check:', settings.regularizeEnabled, _geometryWasRegularized);
+	//console.log('export regularize check:', settings.regularizeEnabled, _geometryWasRegularized);
 	if (settings.regularizeEnabled && !_geometryWasRegularized) {
       setProgress(0.30, t('progress.regularizing'));
       await yieldFrame();
@@ -5082,6 +5105,7 @@ async function bakeTextures() {
 
     // ── Per-body bake ─────────────────────────────────────────────────────────
     const bodies = get3mfBodies();
+    let triToBody = null;
     if (bodies && bodies.length > 1) {
       const exportEntry_bake = getEffectiveMapEntry();
       const perBodyFraction  = 0.08 / bodies.length;
@@ -5097,7 +5121,7 @@ async function bakeTextures() {
         body._origStartTri = body.startTri;
         body._origTriCount = body.triCount;
       }
-      const triToBody = new Int32Array(postBakeTrisTotal).fill(-1);
+      triToBody = new Int32Array(postBakeTrisTotal).fill(-1);
       if (faceParentId) {
         for (let i = 0; i < postBakeTrisTotal; i++) {
           const origTri = faceParentId[i];
@@ -5120,12 +5144,21 @@ async function bakeTextures() {
         const bi = triToBody[i];
         if (bi >= 0) postBakeCount[bi]++;
       }
+      // Log triToBody distribution
+      const triToBodyCount = new Array(bodies.length).fill(0);
+      for (let i = 0; i < postBakeTrisTotal; i++) {
+        const bi = triToBody[i];
+        if (bi >= 0) triToBodyCount[bi]++;
+      }
+      for (let bi = 0; bi < bodies.length; bi++) {
+        console.log(`triToBody: body ${bi} (${bodies[bi].name}): ${triToBodyCount[bi]} triangles`);
+      }
       let runningPostBake = 0;
       for (let bi = 0; bi < bodies.length; bi++) {
         bodies[bi].startTri = runningPostBake;
         bodies[bi].triCount = postBakeCount[bi];
         runningPostBake += postBakeCount[bi];
-		console.log(`baking body ${bi} with refineLength=${settings.refineLength}`);
+		//console.log(`baking body ${bi} with refineLength=${settings.refineLength}`);
       }
 
       // Per-body bake: only process bodies that had paint applied
@@ -5212,7 +5245,10 @@ async function bakeTextures() {
             bodyGeo, bodyRefineLength, null, bodyFaceWeights
           ));
 
-		  console.log(`body ${bi} (${body.name}): wasRegularized=${body.wasRegularized}, regularizeEnabled=${settings.regularizeEnabled}`);	
+		  //console.log(`body ${bi} (${body.name}): wasRegularized=${body.wasRegularized}, regularizeEnabled=${settings.regularizeEnabled}`);	
+		  const posCount = bodySubdivided.attributes.position.count;
+		  const idxCount = bodySubdivided.index ? bodySubdivided.index.count : posCount;
+		  //console.log(`body ${bi} pre-regularize: ${posCount/3} tris, indexed=${!!bodySubdivided.index}`);		  
           if (settings.regularizeEnabled) {
             const reg = regularizeMesh(
               bodySubdivided,
@@ -5313,9 +5349,13 @@ async function bakeTextures() {
     }
     // ── end per-body bake ────────────────────────────────────────────────────
 
-    adoptBakedGeometry(displaced, newBounds, { preExcludedFaces: preExcluded });
-    displaced = null;
-
+    // Save pre-bake adjacency slices for unpainted bodies so adoptBakedGeometry
+    // can restore them without rebuilding on the full displaced geometry.
+    adoptBakedGeometry(displaced, newBounds, {
+      preExcludedFaces: preExcluded,
+      triToBody:        triToBody || null,
+      bodies:           bodies    || null,
+    });
     succeeded = true;
     setBakeProgress(1.0, t('progress.done'));
     setTimeout(() => { bakeProgress.classList.add('hidden'); setBakeProgress(0, ''); }, 1200);
@@ -5344,6 +5384,9 @@ async function bakeTextures() {
 // and seeds excludedFaces from opts.preExcludedFaces.
 
 function adoptBakedGeometry(geometry, bounds, opts = {}) {
+  const _triToBody       = opts.triToBody       || null;
+  const _bodies          = opts.bodies          || null;
+  const _savedAdjacency  = opts.savedAdjacency  || null;
   // Invalidate any in-flight async operations tied to the previous mesh.
   precisionToken++;
   dispPreviewToken++;
@@ -5408,6 +5451,7 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   if (selectionMode) setSelectionMode(false);
 
   // Seed exclusion mask, exit any active painting/place/rotate modes.
+  //console.log('adoptBaked: preExcludedFaces count=', opts.preExcludedFaces ? opts.preExcludedFaces.length : 0);
   excludedFaces = new Set(opts.preExcludedFaces || []);
   precisionExcludedFaces = new Set();
   exclusionTool = null;
@@ -5426,28 +5470,80 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   setHoverPreview(null);
   _lastHoverTriIdx = -1;
 
-  // Build adjacency for the new geometry (needed by brush/bucket tools and
-  // by the exclusion overlay).
-  console.log('adoptBaked: starting adjacency');
-  const adjTriCount = geometry.attributes.position.count / 3;
-  console.log('adoptBaked: adjTriCount =', adjTriCount);
-  const MAX_ADJ_TRIS = 4_000_000;
-  triangleAdjacency   = null;
-  triangleCentroids   = null;
+  // Build adjacency only for unpainted bodies — those are the ones the user
+  // will paint next. Painted bodies have massive post-displacement triangle
+  // counts and will never be painted again, so adjacency for them is wasted.
+  // We build adjacency on currentGeometry (the merged post-bake mesh) but
+  // only count triangles belonging to unpainted bodies to decide whether
+  // it's feasible.
+  //console.log('adoptBaked: _triToBody length=', _triToBody ? _triToBody.length : 'null', 'postBakeTriCount=', geometry.attributes.position.count / 3, 'unpaintedTriCount will be computed');
+  // Save pre-bake adjacency before nulling — used by unchecked path
+  triangleAdjacency  = null;
+  triangleCentroids  = null;
   triangleFaceNormals = null;
 
-  if (excludedFaces.size > 0 && adjTriCount <= MAX_ADJ_TRIS) {
+  const bodies = _bodies || get3mfBodies();
+  const postBakeTriCount = geometry.attributes.position.count / 3;
+
+  // Count unpainted body triangles using triToBody — the authoritative mapping
+  // built during the bake. Each entry is the body index for that merged triangle.
+  let unpaintedTriCount = 0;
+  if (_triToBody && bodies && bodies.length > 1) {
+    for (let i = 0; i < _triToBody.length; i++) {
+      const bi = _triToBody[i];
+      if (bi >= 0 && bodies[bi] && !bodies[bi].wasPainted) unpaintedTriCount++;
+    }
+  } else if (bodies && bodies.length > 1) {
+    for (const body of bodies) {
+      if (!body.wasPainted && body.geometry) {
+        unpaintedTriCount += (body.geometry.attributes.position.count / 3) | 0;
+      }
+    }
+  }
+
+  //console.log('adoptBaked: unpaintedTriCount=', unpaintedTriCount, 'of postBakeTriCount=', postBakeTriCount);
+  //console.log('adoptBaked: bakeAdjacencyChk=', bakeAdjacencyChk, 'checked=', bakeAdjacencyChk ? bakeAdjacencyChk.checked : 'N/A');
+
+  if (unpaintedTriCount > 0) {
+    if (bakeAdjacencyChk && bakeAdjacencyChk.checked) {console.log('adoptBaked: taking CHECKED path');
+      // Checked: build on full geometry including displaced bodies
+      const adjData = buildAdjacency(currentGeometry);
+      triangleAdjacency   = adjData.adjacency;
+      triangleCentroids   = adjData.centroids;
+      triangleFaceNormals = adjData.faceNormals;
+      updateMeshDiagnostics(adjData, postBakeTriCount);
+    } else if (_triToBody && bodies && bodies.length > 1) {
+      console.log('adoptBaked: taking UNCHECKED triToBody path');
+      const adjData = buildAdjacency(currentGeometry);
+      for (let i = 0; i < postBakeTriCount; i++) {
+        if (!adjData.adjacency[i]) continue;
+        const bi = _triToBody[i];
+        if (bi >= 0 && bodies[bi] && bodies[bi].wasPainted) {
+          adjData.adjacency[i] = null;
+          continue;
+        }
+        adjData.adjacency[i] = adjData.adjacency[i].filter(n => {
+          const nbi = _triToBody[n.neighbor];
+          return nbi === bi;
+        });
+      }
+      triangleAdjacency   = adjData.adjacency;
+      triangleCentroids   = adjData.centroids;
+      triangleFaceNormals = adjData.faceNormals;
+      updateMeshDiagnostics(
+        { adjacency: adjData.adjacency, centroids: adjData.centroids, faceNormals: adjData.faceNormals },
+        postBakeTriCount
+      );
+    }
+  }
+  
+  if (excludedFaces.size > 0 && triangleAdjacency) {
     refreshExclusionOverlay();
   } else {
     setExclusionOverlay(null);
   }
-  console.log('adoptBaked: overlay done');
-  // Refresh exclusion overlay using the new geometry + new mask.
-  if (excludedFaces.size > 0 && adjTriCount <= MAX_ADJ_TRIS) {
-    refreshExclusionOverlay();
-  } else {
-    setExclusionOverlay(null);
-  }
+  //console.log('adoptBaked: excludedFaces size after overlay=', excludedFaces.size);  
+  //console.log('adoptBaked: overlay done');
   const maskCount = excludedFaces.size;
   exclCount.textContent = maskCount === 0
     ? t('excl.initExcluded')
@@ -5470,15 +5566,15 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   if (bakeBtnQuick) bakeBtnQuick.disabled = bakeBtn.disabled;
   updateSmartResBtnState();
   
-  console.log('adoptBaked: calling updatePreview');
+  console.log('adoptBaked: calling updatePreview, excludedFaces=', excludedFaces.size, 'selectionMode=', selectionMode);
   updatePreview();
-  console.log('adoptBaked: updatePreview done');
+  //console.log('adoptBaked: updatePreview done');
 
   // Bake is a destructive transform — undo history references the pre-bake
   // triangle set, so it's no longer meaningful.
-  console.log('adoptBaked: clearing undo');
+  //console.log('adoptBaked: clearing undo');
   _clearUndoStacks();
-  console.log('adoptBaked: complete');
+  //console.log('adoptBaked: complete');
 }
 
 /**

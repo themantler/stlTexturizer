@@ -107,7 +107,7 @@ export function buildAdjacency(geometry) {
   // numEdgeKey produces a unique number for each undirected edge
   const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
   // Build edge map using typed array hash to avoid Map size limits
-  const EDGE_HASH_SIZE = 1 << 23; // 8M buckets
+  const EDGE_HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
   const edgeHashTable = new Int32Array(EDGE_HASH_SIZE).fill(-1);
   const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
   const edgeHashKey   = new Float64Array(triCount * 3);
