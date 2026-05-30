@@ -69,6 +69,44 @@
         <span data-i18n="ui.rotate">Rotate</span>
       </button>
       <span class="project-io-gap" aria-hidden="true"></span>
+
+      <!-- Bake -->
+      <div id="bake-progress" class="export-progress header-progress hidden">
+        <div class="export-progress-track">
+          <div id="bake-progress-bar" class="export-progress-bar"></div>
+          <span id="bake-progress-pct" class="export-progress-pct"></span>
+        </div>
+        <span id="bake-progress-label" data-i18n="progress.processing">Processing…</span>
+      </div>
+      <button id="bake-btn" class="place-on-face-btn" disabled
+              title="Apply the current texture to the mesh and reload the result as the working model.">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 1 0 10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 6v6l4 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span data-i18n="ui.bakeTextures">Bake</span>
+      </button>
+
+      <span class="project-io-gap" aria-hidden="true"></span>
+
+      <!-- Export -->
+      <div id="export-progress" class="export-progress header-progress hidden">
+        <div class="export-progress-track">
+          <div id="export-progress-bar" class="export-progress-bar"></div>
+          <span id="export-progress-pct" class="export-progress-pct"></span>
+        </div>
+        <span id="export-progress-label" data-i18n="progress.processing">Processing…</span>
+      </div>
+      <button id="export-btn" class="place-on-face-btn" disabled
+              title="Export as STL">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span data-i18n="ui.exportStl">STL</span>
+      </button>
+      <button id="export-3mf-btn" class="place-on-face-btn" disabled
+              title="Export as 3MF">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span data-i18n="ui.export3mf">3MF</span>
+      </button>
+
+      <span class="project-io-gap" aria-hidden="true"></span>
+      <span class="project-io-gap" aria-hidden="true"></span>
       <div class="project-io">
         <button id="undo-btn" class="icon-btn" data-i18n-title="header.undo" title="Undo (Ctrl+Z)" disabled>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/></svg>
@@ -212,13 +250,6 @@
         </div>
       </section>
 
-        <!-- Quick Bake button -->
-        <div class="export-buttons" style="margin-top:8px;">
-          <button id="bake-btn-quick" class="export-btn" disabled
-                  data-i18n="ui.bakeTextures"
-                  title="Apply the current texture to the mesh and reload the result as the working model.">Bake Textures</button>
-        </div>
-
       <!-- Displacement Map -->
       <section class="panel-section">
         <h2 data-i18n="sections.displacementMap">Displacement Map</h2>
@@ -255,6 +286,117 @@
         </div>
       </section>
 
+      <!-- Masking -->
+      <section class="panel-section">
+        <h2 data-i18n="sections.masking">Masking</h2>
+
+        <!-- Boundary Falloff (applies to both angle and surface masking) -->
+        <div class="form-row slider-row">
+          <label for="boundary-falloff" data-i18n="labels.boundaryFalloff" data-i18n-title="tooltips.boundaryFalloff" title="Gradually reduces displacement to zero near masked boundaries, preventing triangle overlap where textured and non-textured regions meet.">Smooth Mask ⓘ</label>
+          <input type="range" id="boundary-falloff" min="0" max="10" step="0.1" value="0" />
+          <input type="number" class="val" id="boundary-falloff-val" value="0" min="0" max="10" step="0.1" data-wheel-decimals="2" />
+        </div>
+
+        <!-- By Angle -->
+        <h3 class="panel-subsection-heading" data-i18n="sections.maskAngles" data-i18n-title="tooltips.maskAngles" title="0° = no masking. Surfaces within this angle of horizontal will not be textured.">By Angle ⓘ</h3>
+        <div class="form-row slider-row">
+          <label for="bottom-angle-limit" data-i18n="labels.bottomFaces" data-i18n-title="tooltips.bottomFaces" title="Suppress texture on downward-facing surfaces within this angle of horizontal">Bottom faces</label>
+          <input type="range" id="bottom-angle-limit" min="0" max="90" step="1" value="5" />
+          <input type="number" class="val" id="bottom-angle-limit-val" value="5" min="0" max="90" step="1" />
+        </div>
+        <div class="form-row slider-row">
+          <label for="top-angle-limit" data-i18n="labels.topFaces" data-i18n-title="tooltips.topFaces" title="Suppress texture on upward-facing surfaces within this angle of horizontal">Top faces</label>
+          <input type="range" id="top-angle-limit" min="0" max="90" step="1" value="0" />
+          <input type="number" class="val" id="top-angle-limit-val" value="0" min="0" max="90" step="1" />
+        </div>
+
+        <!-- By Surface -->
+        <h3 class="panel-subsection-heading" id="excl-section-heading" data-i18n="sections.surfaceMasking" data-i18n-title="tooltips.surfaceMasking" title="Mask surfaces to control which areas receive displacement.">By Surface ⓘ</h3>
+        <p id="excl-hint" class="excl-hint" style="display:none"></p>
+
+        <!-- Mode toggle: Exclude / Include Only -->
+        <div class="excl-mode-row">
+          <div class="excl-seg">
+            <button id="excl-mode-exclude" class="excl-seg-btn active" aria-pressed="true"
+              data-i18n="excl.modeExclude" data-i18n-title="excl.modeExcludeTitle"
+              title="Exclude mode: painted surfaces will not receive texture displacement">Exclude</button>
+            <button id="excl-mode-include" class="excl-seg-btn" aria-pressed="false"
+              data-i18n="excl.modeIncludeOnly" data-i18n-title="excl.modeIncludeOnlyTitle"
+              title="Include Only mode: only painted surfaces will receive texture displacement">Include Only</button>
+          </div>
+        </div>
+
+        <!-- Tool buttons -->
+        <div class="excl-tools">
+          <button id="excl-brush-btn" class="excl-tool-btn" aria-pressed="false"
+            data-i18n-title="excl.toolBrushTitle"
+            title="Brush: paint triangles to exclude">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h2c1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+              <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h2c1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
+            </svg>
+            <span data-i18n="excl.toolBrush">Brush</span>
+          </button>
+          <button id="excl-bucket-btn" class="excl-tool-btn" aria-pressed="false"
+            data-i18n-title="excl.toolFillTitle"
+            title="Bucket fill: flood-fill surface up to a threshold angle">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 11V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9"/>
+              <path d="M13 17h8m-4-4 4 4-4 4"/>
+            </svg>
+            <span data-i18n="excl.toolFill">Fill</span>
+          </button>
+        </div>
+
+        <!-- Precision masking toggle -->
+        <div id="precision-masking-row" class="form-row precision-masking-row hidden">
+          <label class="precision-label">
+            <input type="checkbox" id="precision-masking-toggle" />
+            <span data-i18n="precision.label" data-i18n-title="precision.labelTitle"
+              title="Subdivide mesh in the background so the brush selects at finer granularity">Precision ⓘ</span>
+          </label>
+          <span id="precision-status" class="precision-status"></span>
+          <span id="precision-outdated" class="precision-outdated hidden"
+            data-i18n="precision.outdated">⚠ Outdated</span>
+          <button id="precision-refresh-btn" class="precision-refresh-btn hidden"
+            data-i18n-title="precision.refreshTitle"
+            title="Re-subdivide mesh to match current brush size">⟳</button>
+        </div>
+        <div id="precision-warning" class="precision-warning hidden"></div>
+
+        <!-- Brush type switcher (shown only when Brush is active) -->
+        <div id="excl-brush-type-row" class="form-row hidden">
+          <span id="excl-brush-type-label" class="form-row-label" data-i18n="labels.type">Type</span>
+          <div class="excl-seg" role="group" aria-labelledby="excl-brush-type-label">
+            <button id="excl-brush-single" class="excl-seg-btn active" data-i18n="brushType.single">Single</button>
+            <button id="excl-brush-radius-btn" class="excl-seg-btn" data-i18n="brushType.circle">Circle</button>
+          </div>
+        </div>
+
+        <!-- Radius slider (shown when Brush + Radius) -->
+        <div id="excl-radius-row" class="form-row slider-row hidden">
+          <label for="excl-brush-radius-slider" data-i18n="labels.size">Size</label>
+          <input type="range" id="excl-brush-radius-slider" min="0.2" max="100" step="0.2" value="10" />
+          <input type="number" class="val" id="excl-brush-radius-val" value="10" min="0.2" max="100" step="0.2" data-wheel-decimals="1" />
+        </div>
+
+        <!-- Bucket threshold (shown when Fill is active) -->
+        <div id="excl-threshold-row" class="form-row slider-row hidden">
+          <label for="excl-threshold-slider" data-i18n="labels.maxAngle" data-i18n-title="tooltips.maxAngle" title="Maximum dihedral angle between adjacent triangles for the fill to cross">Max angle</label>
+          <input type="range" id="excl-threshold-slider" min="0" max="180" step="1" value="20" />
+          <input type="number" class="val" id="excl-threshold-val" value="20" min="0" max="180" step="1" />
+        </div>
+
+        <!-- Footer: count + clear -->
+        <div class="excl-footer">
+          <span id="excl-count" class="excl-count">0 faces masked</span>
+          <span id="excl-shift-hint" class="excl-shift-hint" data-i18n="excl.shiftHint">Hold Shift to erase</span>
+          <button id="excl-clear-btn" class="excl-clear-btn" data-i18n="ui.clearAll">Clear All</button>
+        </div>
+
+        <!-- Debug: stats for last picked triangle (sliver/edge-length investigation) -->
+        <pre id="masking-tri-debug" class="masking-tri-debug" hidden></pre>
+      </section>
 	  
       <!-- Projection -->
       <section class="panel-section">
@@ -400,120 +542,8 @@
         </div>
       </section>
 
-      <!-- Masking -->
-      <section class="panel-section">
-        <h2 data-i18n="sections.masking">Masking</h2>
-
-        <!-- Boundary Falloff (applies to both angle and surface masking) -->
-        <div class="form-row slider-row">
-          <label for="boundary-falloff" data-i18n="labels.boundaryFalloff" data-i18n-title="tooltips.boundaryFalloff" title="Gradually reduces displacement to zero near masked boundaries, preventing triangle overlap where textured and non-textured regions meet.">Smooth Mask ⓘ</label>
-          <input type="range" id="boundary-falloff" min="0" max="10" step="0.1" value="0" />
-          <input type="number" class="val" id="boundary-falloff-val" value="0" min="0" max="10" step="0.1" data-wheel-decimals="2" />
-        </div>
-
-        <!-- By Angle -->
-        <h3 class="panel-subsection-heading" data-i18n="sections.maskAngles" data-i18n-title="tooltips.maskAngles" title="0° = no masking. Surfaces within this angle of horizontal will not be textured.">By Angle ⓘ</h3>
-        <div class="form-row slider-row">
-          <label for="bottom-angle-limit" data-i18n="labels.bottomFaces" data-i18n-title="tooltips.bottomFaces" title="Suppress texture on downward-facing surfaces within this angle of horizontal">Bottom faces</label>
-          <input type="range" id="bottom-angle-limit" min="0" max="90" step="1" value="5" />
-          <input type="number" class="val" id="bottom-angle-limit-val" value="5" min="0" max="90" step="1" />
-        </div>
-        <div class="form-row slider-row">
-          <label for="top-angle-limit" data-i18n="labels.topFaces" data-i18n-title="tooltips.topFaces" title="Suppress texture on upward-facing surfaces within this angle of horizontal">Top faces</label>
-          <input type="range" id="top-angle-limit" min="0" max="90" step="1" value="0" />
-          <input type="number" class="val" id="top-angle-limit-val" value="0" min="0" max="90" step="1" />
-        </div>
-
-        <!-- By Surface -->
-        <h3 class="panel-subsection-heading" id="excl-section-heading" data-i18n="sections.surfaceMasking" data-i18n-title="tooltips.surfaceMasking" title="Mask surfaces to control which areas receive displacement.">By Surface ⓘ</h3>
-        <p id="excl-hint" class="excl-hint" style="display:none"></p>
-
-        <!-- Mode toggle: Exclude / Include Only -->
-        <div class="excl-mode-row">
-          <div class="excl-seg">
-            <button id="excl-mode-exclude" class="excl-seg-btn active" aria-pressed="true"
-              data-i18n="excl.modeExclude" data-i18n-title="excl.modeExcludeTitle"
-              title="Exclude mode: painted surfaces will not receive texture displacement">Exclude</button>
-            <button id="excl-mode-include" class="excl-seg-btn" aria-pressed="false"
-              data-i18n="excl.modeIncludeOnly" data-i18n-title="excl.modeIncludeOnlyTitle"
-              title="Include Only mode: only painted surfaces will receive texture displacement">Include Only</button>
-          </div>
-        </div>
-
-        <!-- Tool buttons -->
-        <div class="excl-tools">
-          <button id="excl-brush-btn" class="excl-tool-btn" aria-pressed="false"
-            data-i18n-title="excl.toolBrushTitle"
-            title="Brush: paint triangles to exclude">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h2c1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
-              <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h2c1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/>
-            </svg>
-            <span data-i18n="excl.toolBrush">Brush</span>
-          </button>
-          <button id="excl-bucket-btn" class="excl-tool-btn" aria-pressed="false"
-            data-i18n-title="excl.toolFillTitle"
-            title="Bucket fill: flood-fill surface up to a threshold angle">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 11V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9"/>
-              <path d="M13 17h8m-4-4 4 4-4 4"/>
-            </svg>
-            <span data-i18n="excl.toolFill">Fill</span>
-          </button>
-        </div>
-
-        <!-- Precision masking toggle -->
-        <div id="precision-masking-row" class="form-row precision-masking-row hidden">
-          <label class="precision-label">
-            <input type="checkbox" id="precision-masking-toggle" />
-            <span data-i18n="precision.label" data-i18n-title="precision.labelTitle"
-              title="Subdivide mesh in the background so the brush selects at finer granularity">Precision ⓘ</span>
-          </label>
-          <span id="precision-status" class="precision-status"></span>
-          <span id="precision-outdated" class="precision-outdated hidden"
-            data-i18n="precision.outdated">⚠ Outdated</span>
-          <button id="precision-refresh-btn" class="precision-refresh-btn hidden"
-            data-i18n-title="precision.refreshTitle"
-            title="Re-subdivide mesh to match current brush size">⟳</button>
-        </div>
-        <div id="precision-warning" class="precision-warning hidden"></div>
-
-        <!-- Brush type switcher (shown only when Brush is active) -->
-        <div id="excl-brush-type-row" class="form-row hidden">
-          <span id="excl-brush-type-label" class="form-row-label" data-i18n="labels.type">Type</span>
-          <div class="excl-seg" role="group" aria-labelledby="excl-brush-type-label">
-            <button id="excl-brush-single" class="excl-seg-btn active" data-i18n="brushType.single">Single</button>
-            <button id="excl-brush-radius-btn" class="excl-seg-btn" data-i18n="brushType.circle">Circle</button>
-          </div>
-        </div>
-
-        <!-- Radius slider (shown when Brush + Radius) -->
-        <div id="excl-radius-row" class="form-row slider-row hidden">
-          <label for="excl-brush-radius-slider" data-i18n="labels.size">Size</label>
-          <input type="range" id="excl-brush-radius-slider" min="0.2" max="100" step="0.2" value="10" />
-          <input type="number" class="val" id="excl-brush-radius-val" value="10" min="0.2" max="100" step="0.2" data-wheel-decimals="1" />
-        </div>
-
-        <!-- Bucket threshold (shown when Fill is active) -->
-        <div id="excl-threshold-row" class="form-row slider-row hidden">
-          <label for="excl-threshold-slider" data-i18n="labels.maxAngle" data-i18n-title="tooltips.maxAngle" title="Maximum dihedral angle between adjacent triangles for the fill to cross">Max angle</label>
-          <input type="range" id="excl-threshold-slider" min="0" max="180" step="1" value="20" />
-          <input type="number" class="val" id="excl-threshold-val" value="20" min="0" max="180" step="1" />
-        </div>
-
-        <!-- Footer: count + clear -->
-        <div class="excl-footer">
-          <span id="excl-count" class="excl-count">0 faces masked</span>
-          <span id="excl-shift-hint" class="excl-shift-hint" data-i18n="excl.shiftHint">Hold Shift to erase</span>
-          <button id="excl-clear-btn" class="excl-clear-btn" data-i18n="ui.clearAll">Clear All</button>
-        </div>
-
-        <!-- Debug: stats for last picked triangle (sliver/edge-length investigation) -->
-        <pre id="masking-tri-debug" class="masking-tri-debug" hidden></pre>
-      </section>
-
       <!-- Advanced / Beta Features (collapsible) -->
-      <section class="panel-section advanced-section collapsed" id="advanced-section">
+      <section class="panel-section advanced-section" id="advanced-section">
         <h2 class="advanced-toggle" id="advanced-toggle"
             data-i18n="sections.advancedFeatures"
             data-i18n-title="tooltips.advancedFeatures"
@@ -582,30 +612,17 @@
               <input type="number" id="reg-second-pass-mul" class="val" min="1" max="8" step="0.1" value="1.1" />
             </div>
           </div>
-
-          <h3 class="panel-subsection-heading" data-i18n="ui.bakeTexturesHeading">Bake Textures</h3>
-          <p class="advanced-blurb" data-i18n="ui.bakeTexturesDesc">Apply the current texture to the mesh and reload the result as the working model so you can keep editing.</p>
-          <div class="form-row bake-mask-row">
-            <label class="checkbox-label" for="bake-mask-chk">
-              <input type="checkbox" id="bake-mask-chk" checked />
-              <span data-i18n="ui.bakeMaskNewFaces">Mask just-baked faces from further texturing</span>
-            </label>
-          </div>
-          <div id="bake-progress" class="export-progress hidden">
-            <div class="export-progress-track">
-              <div id="bake-progress-bar" class="export-progress-bar"></div>
-              <span id="bake-progress-pct" class="export-progress-pct"></span>
-            </div>
-            <span id="bake-progress-label" data-i18n="progress.processing">Processing…</span>
-          </div>
-          <div class="export-buttons">
-            <button id="bake-btn" class="export-btn" disabled
-                    data-i18n="ui.bakeTextures"
-                    data-i18n-title="tooltips.bakeTextures"
-                    title="Apply the current texture to the mesh and reload the result as the working model.">Bake Textures</button>
-          </div>
         </div>
       </section>
+		<section class="panel-section">
+		  <h2>Bake Textures</h2>
+		  <div class="form-row bake-mask-row">
+			<label class="checkbox-label" for="bake-mask-chk">
+			  <input type="checkbox" id="bake-mask-chk" checked />
+			  <span data-i18n="ui.bakeMaskNewFaces">Mask just-baked faces from further texturing</span>
+			</label>
+		  </div>
+		</section>
 
       <!-- Export -->
       <section class="panel-section">
@@ -631,19 +648,6 @@
         <div id="tri-limit-warning" class="tri-limit-warning hidden" data-i18n="warnings.safetyCapHit">
           ⚠ 16M-triangle safety cap hit during subdivision — result may still be coarser than requested edge length.
         </div>
-
-        <div id="export-progress" class="export-progress hidden">
-          <div class="export-progress-track">
-            <div id="export-progress-bar" class="export-progress-bar"></div>
-            <span id="export-progress-pct" class="export-progress-pct"></span>
-          </div>
-          <span id="export-progress-label" data-i18n="progress.processing">Processing…</span>
-        </div>
-        <div class="export-buttons">
-          <button id="export-btn" class="export-btn" disabled data-i18n="ui.exportStl" data-i18n-title="tooltips.exportStl" title="Widely compatible with all slicers">Export STL</button>
-          <button id="export-3mf-btn" class="export-btn" disabled data-i18n="ui.export3mf" data-i18n-title="tooltips.export3mf" title="Smaller file size — may not be accepted by all slicers">Export 3MF</button>
-        </div>
-      </section>
 
       <button id="welcome-link" class="license-link">What&rsquo;s New</button>
       <button id="license-link" class="license-link" data-i18n="license.btn">License &amp; Terms</button>
@@ -713,43 +717,6 @@
         <span data-i18n="sponsor.dontShow">Don't show this again</span>
       </label>
       <button id="sponsor-close" class="sponsor-close-btn" data-i18n-html="sponsor.closeAndContinue">Close &amp; Continue</button>
-    </div>
-  </div>
-
-  <!-- Welcome / What's New popup -->
-  <div id="welcome-overlay" class="welcome-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
-    <div class="welcome-modal">
-      <button id="welcome-close" class="license-close-btn" aria-label="Close">&#215;</button>
-      <h2 id="welcome-title">Welcome to BumpMesh</h2>
-      <p class="welcome-tagline">Add a texture to any of your STLs &mdash; directly in your browser, no cloud and completely free!</p>
-
-      <h3 class="welcome-heading">Quick start</h3>
-      <ol class="welcome-steps">
-        <li>Import an STL, OBJ or 3MF.</li>
-        <li>Pick a texture from the preset library or upload your own image.</li>
-        <li>Tweak amplitude, scale, and mapping mode to taste.</li>
-        <li>Export as STL or 3MF.</li>
-      </ol>
-
-      <h3 class="welcome-heading">New in this release <span class="welcome-date">&mdash; May 2026</span></h3>
-      <ul class="welcome-changelog">
-        <li><strong>Mesh regularization</strong> &mdash; collapses sliver triangles from CAD tessellation so each output triangle samples the texture coherently. Toggle under <em>Advanced / Beta Features</em>.</li>
-        <li><strong>Bake Textures (beta)</strong> &mdash; apply the current texture and continue editing on the textured mesh. Find it under <em>Advanced / Beta Features</em>.</li>
-        <li><strong>Significantly improved cylindrical mapping workflow</strong></li>
-        <li><strong>Part rotation gizmo</strong></li>
-        <li><strong>Mesh Check</strong></li>
-        <li><strong>Undo / redo</strong> with full keyboard shortcuts.</li>
-        <li><strong>Save &amp; load projects</strong> as <code>.bumpmesh</code> files.</li>
-        <li><strong>Smooth masking borders</strong></li>
-        <li><strong>New languages:</strong> Italian, Spanish, Portuguese, Japanese, French, Korean</li>
-        <li>Lots of performance and quality-of-life improvements</li>
-      </ul>
-
-      <label class="sponsor-no-show">
-        <input type="checkbox" id="welcome-dont-show" />
-        <span>Don&rsquo;t show this again until there&rsquo;s something new</span>
-      </label>
-      <button id="welcome-got-it" class="sponsor-close-btn">Got it</button>
     </div>
   </div>
 

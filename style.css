@@ -141,6 +141,7 @@ header {
   gap: 12px;
   position: relative;
   z-index: 10;
+  overflow: visible;
 }
 
 .logo {
@@ -1900,4 +1901,32 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   background: var(--border);
   border-color: var(--accent);
   color: var(--text);
+}
+
+.header-progress {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  font-size: 0.7rem;
+  max-width: 110px;
+  padding: 3px 6px;
+  margin-bottom: 0;
+  border-radius: var(--radius);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  align-self: center;
+}
+
+.header-progress .export-progress-track {
+  height: 8px;
+  margin-bottom: 0;
+}
+
+.header-progress .export-progress-label,
+.header-progress [data-i18n="progress.processing"] {
+  font-size: 0.65rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
