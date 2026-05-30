@@ -233,12 +233,17 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // For each unique-vertex id, neighbors[csrStart[id]..csrStart[id+1])
     // is the contiguous slice of neighbour ids.
     const degree = new Uint32Array(uniqueCount);
+    const LAPLACIAN_COS = Math.cos(30 * Math.PI / 180); // only smooth within 30°
     for (let t = 0; t < count; t += 3) {
       const a = vertexId[t], b = vertexId[t + 1], c = vertexId[t + 2];
-      if (a !== b) { degree[a]++; degree[b]++; }
-      if (b !== c) { degree[b]++; degree[c]++; }
-      if (c !== a) { degree[c]++; degree[a]++; }
+      const dotAB = smoothNrmX[a]*smoothNrmX[b] + smoothNrmY[a]*smoothNrmY[b] + smoothNrmZ[a]*smoothNrmZ[b];
+      const dotBC = smoothNrmX[b]*smoothNrmX[c] + smoothNrmY[b]*smoothNrmY[c] + smoothNrmZ[b]*smoothNrmZ[c];
+      const dotCA = smoothNrmX[c]*smoothNrmX[a] + smoothNrmY[c]*smoothNrmY[a] + smoothNrmZ[c]*smoothNrmZ[a];
+      if (a !== b && dotAB > LAPLACIAN_COS) { degree[a]++; degree[b]++; }
+      if (b !== c && dotBC > LAPLACIAN_COS) { degree[b]++; degree[c]++; }
+      if (c !== a && dotCA > LAPLACIAN_COS) { degree[c]++; degree[a]++; }
     }
+
     const csrStart = new Uint32Array(uniqueCount + 1);
     for (let id = 0; id < uniqueCount; id++) csrStart[id + 1] = csrStart[id] + degree[id];
     const totalEdges = csrStart[uniqueCount];
@@ -246,9 +251,12 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     const cursor = new Uint32Array(uniqueCount);
     for (let t = 0; t < count; t += 3) {
       const a = vertexId[t], b = vertexId[t + 1], c = vertexId[t + 2];
-      if (a !== b) { neighbors[csrStart[a] + cursor[a]++] = b; neighbors[csrStart[b] + cursor[b]++] = a; }
-      if (b !== c) { neighbors[csrStart[b] + cursor[b]++] = c; neighbors[csrStart[c] + cursor[c]++] = b; }
-      if (c !== a) { neighbors[csrStart[c] + cursor[c]++] = a; neighbors[csrStart[a] + cursor[a]++] = c; }
+      const dotAB = smoothNrmX[a]*smoothNrmX[b] + smoothNrmY[a]*smoothNrmY[b] + smoothNrmZ[a]*smoothNrmZ[b];
+      const dotBC = smoothNrmX[b]*smoothNrmX[c] + smoothNrmY[b]*smoothNrmY[c] + smoothNrmZ[b]*smoothNrmZ[c];
+      const dotCA = smoothNrmX[c]*smoothNrmX[a] + smoothNrmY[c]*smoothNrmY[a] + smoothNrmZ[c]*smoothNrmZ[a];
+      if (a !== b && dotAB > LAPLACIAN_COS) { neighbors[csrStart[a] + cursor[a]++] = b; neighbors[csrStart[b] + cursor[b]++] = a; }
+      if (b !== c && dotBC > LAPLACIAN_COS) { neighbors[csrStart[b] + cursor[b]++] = c; neighbors[csrStart[c] + cursor[c]++] = b; }
+      if (c !== a && dotCA > LAPLACIAN_COS) { neighbors[csrStart[c] + cursor[c]++] = a; neighbors[csrStart[a] + cursor[a]++] = c; }
     }
 
     // Laplacian smoothing on a writable copy. Read from current, write to

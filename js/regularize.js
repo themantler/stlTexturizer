@@ -97,7 +97,6 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   // ── Build indexed mesh ──
   const pa = geometry.attributes.position.array;
   const triCount = pa.length / 9;
-  console.log('regularize: triCount =', triCount);	
 
   const vertX = [], vertY = [], vertZ = [];
   let nextVid = 0;
@@ -245,7 +244,6 @@ let edgeSlot = 0;
       if (edgeHashTri[s] === -1) matchedSlots++;
       else if (edgeHashTri[s] !== -2) unmatchedSlots++;
     }
-    console.log(`edge slots: total=${edgeSlot}, matched=${matchedSlots}, unmatched=${unmatchedSlots}`);
   }
 
   // helper: triangles that contain both u and v
@@ -320,8 +318,6 @@ let edgeSlot = 0;
     }
     totalCollapses += roundCollapses;
     if (roundCollapses === 0) break;
-	console.log(`round ${round}: ${roundCollapses} collapses, ${candidates.length} candidates`);
-	console.log(`round ${round}: frozen=${rejectStats.frozen}, wingCount=${rejectStats.wingCount}, linkCondition=${rejectStats.linkCondition}, edgeCap=${rejectStats.edgeCap}, normalChange=${rejectStats.normalChange}`);
   }
 
   // ── Compact: drop deleted tris, build output buffers ──

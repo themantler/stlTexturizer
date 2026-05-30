@@ -269,9 +269,9 @@ export async function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf'
   const zipped = await new Promise((resolve) => {
     setTimeout(() => {
       resolve(zipSync({
-        '[Content_Types].xml': [strToU8(CONTENT_TYPES_XML), { level: 0 }],
-        '_rels/.rels':         [strToU8(RELS_XML),           { level: 0 }],
-        '3D/3dmodel.model':    [modelBytes,                  { level: 0 }],
+        '[Content_Types].xml': [strToU8(CONTENT_TYPES_XML), { level: 5 }],
+        '_rels/.rels':         [strToU8(RELS_XML),           { level: 5 }],
+        '3D/3dmodel.model':    [modelBytes,                  { level: 5 }],
       }));
     }, 0);
   });
