@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { zipSync, strToU8 } from 'fflate';
 
 async function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
@@ -74,6 +75,22 @@ export function get3mfBodies() {
   return _3mfBodies;
 }
 
+export function get3mfCenterOffset() {
+  return _3mfCenterOffset;
+}
+
+export function rotate3mfCenterOffset(quat) {
+  if (!_3mfCenterOffset) return;
+  const cv = new THREE.Vector3(
+    _3mfCenterOffset.x,
+    _3mfCenterOffset.y,
+    _3mfCenterOffset.z
+  ).applyQuaternion(quat);
+  _3mfCenterOffset.x = cv.x;
+  _3mfCenterOffset.y = cv.y;
+  _3mfCenterOffset.z = cv.z;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmt4(n) {
@@ -99,7 +116,7 @@ function makeEmitter() {
   return {emit,finish};
 }
 
-function emitObjectXml(emitter, geometry, objectId, name) {
+function emitObjectXml(emitter, geometry, objectId, name, colorGroupId=null, colorIndex=null) {
   const { emit } = emitter;
   const posArr   = geometry.attributes.position.array;
   const triCount = (posArr.length / 9) | 0;
@@ -165,7 +182,10 @@ function emitObjectXml(emitter, geometry, objectId, name) {
   }
 
   const namePart = name ? ` name="${escapeXml(name)}"` : '';
-  emit(`<object id="${objectId}"${namePart} type="model">\n<mesh>\n<vertices>\n`);
+  const colorPart = (colorGroupId !== null && colorIndex !== null)
+    ? ` pid="${colorGroupId}" pindex="${colorIndex}"`
+    : '';
+  emit(`<object id="${objectId}"${namePart}${colorPart} type="model">\n<mesh>\n<vertices>\n`);
   for (let i = 0; i < vertCount; i++) {
     emit('<vertex x="' + fmt4(vx[i]) + '" y="' + fmt4(vy[i]) + '" z="' + fmt4(vz[i]) + '"/>\n');
   }
@@ -206,15 +226,30 @@ function buildModelXmlBytes(bodyResultsOrGeometry) {
   emit(
     '<?xml version="1.0" encoding="UTF-8"?>\n'+
     '<model unit="millimeter" xml:lang="en-US" '+
-    'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'+
+    'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '+
+    'xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">\n'+
     '<resources>\n'
   );
   const isMultiBody = Array.isArray(bodyResultsOrGeometry) && bodyResultsOrGeometry.length > 0;
   if (isMultiBody) {
     const bodyResults = bodyResultsOrGeometry;
     const nonEmpty = bodyResults.filter(b => (b.geometry.attributes.position.array.length/9|0) > 0);
+
+    // Write colorgroup if any body has color data
+    const colorsToWrite = nonEmpty.map(b => b.color || null);
+    const hasColors = colorsToWrite.some(c => c !== null);
+    const colorGroupIds = [];
+    if (hasColors) {
+      for (let i = 0; i < nonEmpty.length; i++) {
+        const cgId = nonEmpty.length + 1 + i;
+        colorGroupIds.push(cgId);
+        const c = colorsToWrite[i] || '#A0A0A0';
+        emit(`<m:colorgroup id="${cgId}">\n<m:color color="${c}"/>\n</m:colorgroup>\n`);
+      }
+    }
     for (let i=0; i<nonEmpty.length; i++) {
-      emitObjectXml(emitter, nonEmpty[i].geometry, i+1, nonEmpty[i].name||'');
+      const cgId = hasColors ? colorGroupIds[i] : null;
+      emitObjectXml(emitter, nonEmpty[i].geometry, i+1, nonEmpty[i].name||'', cgId, cgId !== null ? 0 : null);
     }
     emit('</resources>\n<build>\n');
     for (let i=0; i<nonEmpty.length; i++) {
@@ -264,8 +299,6 @@ export function build3MFBytes(bodyResultsOrGeometry) {
 // Async export — doesn't block the thread
 export async function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf') {
   const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
-  
-  // Use zipSync but defer to next tick to avoid blocking
   const zipped = await new Promise((resolve) => {
     setTimeout(() => {
       resolve(zipSync({

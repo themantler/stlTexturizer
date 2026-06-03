@@ -13,7 +13,7 @@ import { subdivide }          from './subdivision.js';
 import { regularizeMesh }     from './regularize.js';
 import { applyDisplacement }  from './displacement.js';
 import { decimate }           from './decimation.js';
-import { exportSTL, export3MF, get3mfBodies, build3MFBytes } from './exporter.js';
+import { set3mfBodies, clear3mfBodies, get3mfBodies, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
 import { runFastDiagnostics, runExpensiveDiagnostics,
@@ -57,6 +57,7 @@ let _lastHoverTriIdx   = -1;          // last triangle index used for hover prev
 let placeOnFaceActive  = false;       // true while "Place on Face" mode is active
 let rotateActive       = false;       // true while rotate mode is active
 let rotateAngles       = { x: 0, y: 0, z: 0 };  // accumulated rotation in degrees
+let _cumulativeRotation = new THREE.Quaternion();
 let _rotateOriginalPositions = null;  // Float32Array snapshot before any rotation
 const _raycaster       = new THREE.Raycaster();
 let _lastPaintHitPoint = null;        // THREE.Vector3 — last brush paint position for shift-line
@@ -2592,19 +2593,15 @@ function _rotateGeometry(quat) {
     pos[i + 1] = v.y;
     pos[i + 2] = v.z;
   }
-
-  // Recompute normals
   currentGeometry.computeVertexNormals();
   if (currentGeometry.attributes.faceNormal) {
     currentGeometry.deleteAttribute('faceNormal');
   }
-
   currentGeometry.attributes.position.needsUpdate = true;
   if (currentGeometry.attributes.normal) {
     currentGeometry.attributes.normal.needsUpdate = true;
   }
-
-  // Light update only: swap geometry on mesh, no camera/grid/dimension rebuild
+  _cumulativeRotation = quat.clone().multiply(_cumulativeRotation);
   setMeshGeometry(currentGeometry);
   requestRender();
 }
@@ -3084,6 +3081,7 @@ async function handleModelFile(file) {
     if (rotateActive) toggleRotateMode(false);
     rotateAngles = { x: 0, y: 0, z: 0 };
     rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
+    _cumulativeRotation = new THREE.Quaternion();
     exclBrushBtn.classList.remove('active');
     exclBucketBtn.classList.remove('active');
     exclBrushTypeRow.classList.add('hidden');
@@ -4589,12 +4587,12 @@ async function handleExport(format = 'stl') {
         await yieldFrame();
         if (exportToken !== myToken) return;
 
-        let bodySubdivided = null, bodyDisplaced = null, bodyFinal = null;
+        let bodySubdivided = null, bodyDisplaced = null, bodyFinal = null, bodyGeoForExport = null;
         try {
           const alreadyBaked = !!body.wasPainted;
 
           if (alreadyBaked) {
-            // Body was painted and baked — write the baked geometry directly
+            // Body was painted and baked — geometry is already in rotated space from bake step
             bodyFinal = bodyGeo.clone();
           } else {
             // Not baked — apply current texture.
@@ -4618,9 +4616,28 @@ async function handleExport(format = 'stl') {
               ? buildCombinedFaceWeights(bodyGeo, bodyExcludedLocal, selectionMode, settings)
               : null;
 
+            // Clone and rotate body geometry into the same space as currentGeometry
+            // so applyDisplacement UV mapping matches the viewport preview.
+            // We clone so the stored body geometry is never mutated.
+            let bodyGeoForExport = bodyGeo;
+            const _isRotated = _cumulativeRotation &&
+              Math.abs(_cumulativeRotation.x) + Math.abs(_cumulativeRotation.y) +
+              Math.abs(_cumulativeRotation.z) > 1e-6;
+            if (_isRotated) {
+              bodyGeoForExport = bodyGeo.clone();
+              const _pa = bodyGeoForExport.attributes.position.array;
+              const _rv = new THREE.Vector3();
+              for (let i = 0; i < _pa.length; i += 3) {
+                _rv.set(_pa[i], _pa[i+1], _pa[i+2]).applyQuaternion(_cumulativeRotation);
+                _pa[i] = _rv.x; _pa[i+1] = _rv.y; _pa[i+2] = _rv.z;
+              }
+              bodyGeoForExport.attributes.position.needsUpdate = true;
+              bodyGeoForExport.computeVertexNormals();
+            }
+
             let safetyCapHit;
             ({ geometry: bodySubdivided, safetyCapHit } = await subdivide(
-              bodyGeo,
+              bodyGeoForExport,
               settings.refineLength,
               (p) => setProgress(
                 0.02 + (frac + p / bodies.length) * 0.40,
@@ -4652,7 +4669,7 @@ async function handleExport(format = 'stl') {
               bodySubdivided = resub;
               if (exportToken !== myToken) return;
             }
-
+			
             bodyDisplaced = await runAsync(() =>
               applyDisplacement(
                 bodySubdivided,
@@ -4718,11 +4735,11 @@ async function handleExport(format = 'stl') {
           }
 
           if (settings.smoothBottom) snapBottomToFlat(bodyFinal, currentBounds.min.z, 0.1);
-
-          bodyResults.push({ geometry: bodyFinal, name: body.name, matrix: body.matrix });
+          bodyResults.push({ geometry: bodyFinal, name: body.name, matrix: body.matrix, color: body.color || null });
           bodyFinal = null;
 
         } finally {
+          if (bodyGeoForExport && bodyGeoForExport !== bodyGeo) bodyGeoForExport.dispose();
           if (bodySubdivided) bodySubdivided.dispose();
           if (bodyDisplaced)  bodyDisplaced.dispose();
           if (bodyFinal)      bodyFinal.dispose();
@@ -5230,11 +5247,29 @@ async function bakeTextures() {
             ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
           });
         }
-        let bodySubdivided = null, bodyDisplaced = null;
+        let bodySubdivided = null, bodyDisplaced = null, bodyGeoForBake = null;
         try {
+          // Clone and rotate body geometry into the same space as currentGeometry
+          // so applyDisplacement UV mapping matches the viewport preview
+          bodyGeoForBake = bodyGeo;
+          const _isRotated = _cumulativeRotation &&
+            Math.abs(_cumulativeRotation.x) + Math.abs(_cumulativeRotation.y) +
+            Math.abs(_cumulativeRotation.z) > 1e-6;
+          if (_isRotated) {
+            bodyGeoForBake = bodyGeo.clone();
+            const _pa = bodyGeoForBake.attributes.position.array;
+            const _rv = new THREE.Vector3();
+            for (let i = 0; i < _pa.length; i += 3) {
+              _rv.set(_pa[i], _pa[i+1], _pa[i+2]).applyQuaternion(_cumulativeRotation);
+              _pa[i] = _rv.x; _pa[i+1] = _rv.y; _pa[i+2] = _rv.z;
+            }
+            bodyGeoForBake.attributes.position.needsUpdate = true;
+            bodyGeoForBake.computeVertexNormals();
+          }
+
           let bodyFaceParentId;
           ({ geometry: bodySubdivided, faceParentId: bodyFaceParentId } = await subdivide(
-            bodyGeo, bodyRefineLength, null, bodyFaceWeights
+            bodyGeoForBake, bodyRefineLength, null, bodyFaceWeights
           ));
           if (settings.regularizeEnabled) {
             const reg = regularizeMesh(
@@ -5325,10 +5360,11 @@ async function bakeTextures() {
         } catch (bodyErr) {
           console.error(`Per-body bake failed for body ${bi} (${body.name}):`, bodyErr);
         } finally {
+          if (bodyGeoForBake && bodyGeoForBake !== bodyGeo) bodyGeoForBake.dispose();
           if (bodySubdivided) bodySubdivided.dispose();
           if (bodyDisplaced)  bodyDisplaced.dispose();
-		  if (window.gc) window.gc();
-		}
+          if (window.gc) window.gc();
+        }
 
         setBakeProgress(0.91 + (bi + 1) * perBodyFraction, t('progress.finalizing'));
         await yieldFrame();

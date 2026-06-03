@@ -175,6 +175,7 @@ function parse3MF(data) {
 
   const NS_CORE = 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02';
   const NS_PROD = 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06';
+  const NS_MAT  = 'http://schemas.microsoft.com/3dmanufacturing/material/2015/02';
   const UNIT_TO_MM = { micron:0.001, millimeter:1, centimeter:10, inch:25.4, foot:304.8, meter:1000 };
 
   const objectMap  = new Map();
@@ -207,8 +208,29 @@ function parse3MF(data) {
         if (triangles[i]<0||triangles[i]>=vc||isNaN(triangles[i]))
           throw new Error('Invalid triangle index in 3MF file');
       }
+      // Read per-object color from pid/pindex referencing an m:colorgroup
+      let objectColor = null;
+      const pid    = obj.getAttribute('pid');
+      const pindex = obj.getAttribute('pindex');
+      if (pid && pindex !== null) {
+        const colorGroups = doc.getElementsByTagNameNS(NS_MAT, 'colorgroup');
+        for (const cg of colorGroups) {
+          if (cg.getAttribute('id') === pid) {
+            const colors = cg.getElementsByTagNameNS(NS_MAT, 'color');
+            const idx = parseInt(pindex, 10);
+            if (colors[idx]) {
+              objectColor = colors[idx].getAttribute('color') || null;
+              // Strip alpha channel — keep only #RRGGBB for slicer compatibility
+              if (objectColor && objectColor.length === 9) {
+                objectColor = objectColor.slice(0, 7);
+              }
+            }
+            break;
+          }
+        }
+      }
       const normPath = path.replace(/^\//, '').replace(/\\/g, '/');
-      objectMap.set(normPath + '#' + id, { vertices, triangles });
+      objectMap.set(normPath + '#' + id, { vertices, triangles, color: objectColor });
     }
   }
 
@@ -238,8 +260,10 @@ function parse3MF(data) {
     const key = normFile + '#' + objectId;
     if (visiting.has(key)) throw new Error(`Cyclic component reference in 3MF (${key})`);
     visiting.add(key);
-    if (objectMap.has(key))
-      instances.push({ meshKey:key, matrix:parentMatrix.clone(), buildItemIndex, label:objectName||'' });
+    if (objectMap.has(key)) {
+      const _objColor = objectMap.get(key) ? objectMap.get(key).color : null;
+      instances.push({ meshKey:key, matrix:parentMatrix.clone(), buildItemIndex, label:objectName||'', color:_objColor });
+    }
     const doc = readXML(filePath);
     if (!doc) { visiting.delete(key); return; }
     for (const obj of doc.getElementsByTagNameNS(NS_CORE, 'object')) {
@@ -364,6 +388,9 @@ function parse3MF(data) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.computeVertexNormals();
+    // Use the color from the first instance of this body
+    const firstInstance = instances.find(inst => inst.buildItemIndex === bi);
+    const resolvedColor = firstInstance ? firstInstance.color : null;
     return {
       name:        bodyLabel.get(bi) || '',
       matrix:      itemTransforms.get(bi) || identity,
@@ -371,6 +398,7 @@ function parse3MF(data) {
       origGeometry: geo,
       startTri,
       triCount:    tc,
+      color:       firstInstance ? firstInstance.color : null,
     };
   });
 
