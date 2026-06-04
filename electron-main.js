@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
-const { spawn } = require('child_process')
-const path = require('path')
+const http = require('http')
 const fs = require('fs')
+const path = require('path')
 
 app.commandLine.appendSwitch('max-old-space-size', '32768')
 app.commandLine.appendSwitch('js-flags', '--expose-gc --max-old-space-size=32768')
@@ -9,13 +9,48 @@ app.commandLine.appendSwitch('js-flags', '--expose-gc --max-old-space-size=32768
 let mainWindow
 let server
 
-app.whenReady().then(() => {
-  server = spawn('npx', ['serve', '.'], {
-    cwd: path.join(__dirname),
-    shell: true
-  })
+const MIME_TYPES = {
+  '.html': 'text/html',
+  '.js':   'application/javascript',
+  '.css':  'text/css',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.svg':  'image/svg+xml',
+  '.json': 'application/json',
+  '.wasm': 'application/wasm',
+  '.ico':  'image/x-icon',
+  '.ttf':  'font/ttf',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+}
 
-  // Create window immediately but keep retrying until server is ready
+function startServer(rootDir, port) {
+  return new Promise((resolve) => {
+    server = http.createServer((req, res) => {
+      let urlPath = req.url.split('?')[0]
+      if (urlPath === '/') urlPath = '/index.html'
+      const filePath = path.join(rootDir, urlPath)
+      const ext = path.extname(filePath).toLowerCase()
+      const mime = MIME_TYPES[ext] || 'application/octet-stream'
+      fs.readFile(filePath, (err, data) => {
+        if (err) {
+          res.writeHead(404)
+          res.end('Not found')
+        } else {
+          res.writeHead(200, { 'Content-Type': mime })
+          res.end(data)
+        }
+      })
+    })
+    server.listen(port, '127.0.0.1', () => resolve())
+  })
+}
+
+app.whenReady().then(async () => {
+  await startServer(__dirname, 3000)
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -27,28 +62,10 @@ app.whenReady().then(() => {
     },
     title: 'STLTexturizer'
   })
+
   mainWindow.on('closed', () => { mainWindow = null })
-
-  // Retry every 500ms for up to 20 attempts (10 seconds total)
-  tryLoad(mainWindow, 20)
+  mainWindow.loadURL('http://localhost:3000')
 })
-
-function tryLoad(win, attempts) {
-  const http = require('http')
-  http.get('http://localhost:3000', (res) => {
-    if (res.statusCode === 200) {
-      win.loadURL('http://localhost:3000')
-    } else {
-      if (attempts > 0) setTimeout(() => tryLoad(win, attempts - 1), 500)
-    }
-  }).on('error', () => {
-    if (attempts > 0) setTimeout(() => tryLoad(win, attempts - 1), 500)
-  })
-}
-
-function createWindow() {
-  // No longer needed — window created directly in whenReady
-}
 
 // Handle save dialog from renderer
 ipcMain.handle('show-save-dialog', async (event, options) => {
@@ -62,14 +79,7 @@ ipcMain.handle('write-file', async (event, filePath, buffer) => {
   return true
 })
 
-app.whenReady().then(() => {
-  server = spawn('npx', ['serve', '.'], {
-    cwd: path.join(__dirname),
-    shell: true
-  })
-})
-
 app.on('window-all-closed', () => {
-  if (server) server.kill()
+  if (server) server.close()
   if (process.platform !== 'darwin') app.quit()
 })
