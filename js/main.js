@@ -4591,15 +4591,108 @@ async function handleExport(format = 'stl') {
         try {
           const alreadyBaked = !!body.wasPainted;
 
-          if (alreadyBaked) {
-            // Body was painted and baked — geometry is already in rotated space from bake step
-            bodyFinal = bodyGeo.clone();
+          // Check for newly painted faces on this body (post-bake merged space)
+          const pbStart = body.postBakeStart != null ? body.postBakeStart : body.startTri;
+          const pbCount = body.triCount;
+          const newPaintedLocal = new Set();
+          if (alreadyBaked && excludedFaces.size > 0 && pbStart != null) {
+            for (const mergedIdx of excludedFaces) {
+              const localIdx = mergedIdx - pbStart;
+              if (localIdx >= 0 && localIdx < pbCount) {
+                newPaintedLocal.add(localIdx);
+              }
+            }
+          }
+
+          if (alreadyBaked && newPaintedLocal.size === 0) {
+            // Slice this body's triangles directly from currentGeometry
+            const startTri = body.startTri;
+            const triCount  = body.triCount;
+            const srcPos = currentGeometry.attributes.position.array;
+            const srcNrm = currentGeometry.attributes.normal
+              ? currentGeometry.attributes.normal.array : null;
+            const slicePos = new Float32Array(triCount * 9);
+            for (let t = 0; t < triCount; t++) {
+              const src = (startTri + t) * 9;
+              slicePos.set(srcPos.subarray(src, src + 9), t * 9);
+            }
+            bodyFinal = new THREE.BufferGeometry();
+            bodyFinal.setAttribute('position', new THREE.BufferAttribute(slicePos, 3));
+            if (srcNrm) {
+              const sliceNrm = new Float32Array(triCount * 9);
+              for (let t = 0; t < triCount; t++) {
+                const src = (startTri + t) * 9;
+                sliceNrm.set(srcNrm.subarray(src, src + 9), t * 9);
+              }
+              bodyFinal.setAttribute('normal', new THREE.BufferAttribute(sliceNrm, 3));
+            }
+          } else if (alreadyBaked && newPaintedLocal.size > 0) {
+            // Baked body with new painted faces — slice existing baked geometry
+            // and apply displacement to new faces on top
+            const startTri = body.startTri;
+            const triCount  = body.triCount;
+            const srcPos = currentGeometry.attributes.position.array;
+            const srcNrm = currentGeometry.attributes.normal
+              ? currentGeometry.attributes.normal.array : null;
+            const slicePos = new Float32Array(triCount * 9);
+            for (let t = 0; t < triCount; t++) {
+              const src = (startTri + t) * 9;
+              slicePos.set(srcPos.subarray(src, src + 9), t * 9);
+            }
+            const slicedGeo = new THREE.BufferGeometry();
+            slicedGeo.setAttribute('position', new THREE.BufferAttribute(slicePos, 3));
+            if (srcNrm) {
+              const sliceNrm = new Float32Array(triCount * 9);
+              for (let t = 0; t < triCount; t++) {
+                const src = (startTri + t) * 9;
+                sliceNrm.set(srcNrm.subarray(src, src + 9), t * 9);
+              }
+              slicedGeo.setAttribute('normal', new THREE.BufferAttribute(sliceNrm, 3));
+            }
+            // Apply displacement to new painted faces only
+            const faceWeights = buildCombinedFaceWeights(slicedGeo, newPaintedLocal, true, {
+              ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
+            });
+            const _isRotated = _cumulativeRotation &&
+              Math.abs(_cumulativeRotation.x) + Math.abs(_cumulativeRotation.y) +
+              Math.abs(_cumulativeRotation.z) > 1e-6;
+            let slicedGeoForExport = slicedGeo;
+            if (_isRotated) {
+              slicedGeoForExport = slicedGeo.clone();
+              const _pa = slicedGeoForExport.attributes.position.array;
+              const _rv = new THREE.Vector3();
+              for (let i = 0; i < _pa.length; i += 3) {
+                _rv.set(_pa[i], _pa[i+1], _pa[i+2]).applyQuaternion(_cumulativeRotation);
+                _pa[i] = _rv.x; _pa[i+1] = _rv.y; _pa[i+2] = _rv.z;
+              }
+              slicedGeoForExport.attributes.position.needsUpdate = true;
+              slicedGeoForExport.computeVertexNormals();
+            }
+            let sliceSubdivided = null;
+            try {
+              ({ geometry: sliceSubdivided } = await subdivide(
+                slicedGeoForExport, settings.refineLength, null, faceWeights
+              ));
+              bodyFinal = await runAsync(() =>
+                applyDisplacement(
+                  sliceSubdivided,
+                  exportEntry.imageData,
+                  exportEntry.width,
+                  exportEntry.height,
+                  settings,
+                  currentBounds,
+                  null
+                )
+              );
+              sliceSubdivided.dispose();
+              sliceSubdivided = null;
+            } finally {
+              slicedGeo.dispose();
+              if (slicedGeoForExport !== slicedGeo) slicedGeoForExport.dispose();
+              if (sliceSubdivided) sliceSubdivided.dispose();
+            }
           } else {
             // Not baked — apply current texture.
-            // Map excludedFaces from merged currentGeometry to this body's
-            // local triangle indices using body.startTri.
-            // After baking, startTri was updated to reflect the post-bake
-            // merged geometry, so this mapping is correct.
             const bodyLocalTriCount = bodyGeo.attributes.position.count / 3;
             const bodyExcludedLocal = new Set();
             if (excludedFaces.size > 0 && body.startTri != null) {
@@ -5174,7 +5267,8 @@ async function bakeTextures() {
       // Per-body bake: only process bodies that had paint applied
       for (let bi = 0; bi < bodies.length; bi++) {
         const body    = bodies[bi];
-        const bodyGeo = body.geometry;
+        const bodyGeo = body.origGeometry || body.geometry;
+        console.log(`Body ${bi} origGeometry:`, body.origGeometry ? 'exists' : 'null', 'triCount:', bodyGeo.attributes.position.array.length/9);		
         if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) continue;
 		// Force garbage collection before each body to clean up heap fragmentation
 		if (window.gc) window.gc();
@@ -5202,11 +5296,15 @@ async function bakeTextures() {
             }
           }
         }
-        body.wasPainted = bodyWasPainted;
+        // Set wasPainted when painted, never reset to false on re-bake
+        const previouslyBaked = !!body.wasPainted;
+        if (bodyWasPainted) body.wasPainted = true;
+        const shouldBake = bodyWasPainted || previouslyBaked;
+        console.log(`Body ${bi} previouslyBaked:`, previouslyBaked, 'bodyWasPainted:', bodyWasPainted, 'shouldBake:', shouldBake, 'body.wasPainted after:', body.wasPainted);
 
         // Skip baking bodies that weren't painted
-        if (!bodyWasPainted) continue;
-
+        if (!shouldBake) continue;
+		
         // Compute refineLength that keeps this body within bakeBodyBudget
         const bodyTriCount = bodyGeo.attributes.position.count / 3;
         const bodyPosAttr  = bodyGeo.attributes.position;
@@ -5219,20 +5317,29 @@ async function bakeTextures() {
           totalEdge += Math.sqrt((bx-ax)**2+(by-ay)**2+(bz-az)**2);
         }
         const avgEdge = totalEdge / sampleCount;
-        const bodyRefineLength = settings.refineLength;
+        const origTriCount = (body.origGeometry || body.geometry).attributes.position.count / 3;
+        let bodyPaintedLocal = new Set();
 
-        const origStart = body._origStartTri;
-        const origCount = body._origTriCount;
-        const bodyPaintedLocal = new Set();
-        if (excludedFaces.size > 0 && origStart != null) {
-          for (const mergedIdx of excludedFaces) {
-            const localIdx = mergedIdx - origStart;
-            if (localIdx >= 0 && localIdx < origCount) {
-              bodyPaintedLocal.add(localIdx);
+        if (!previouslyBaked) {
+          // First bake — excludedFaces are in original merged space, map via origStartTri
+          const permStart = body.origStartTri != null ? body.origStartTri : body._origStartTri;
+          if (excludedFaces.size > 0 && permStart != null) {
+            for (const mergedIdx of excludedFaces) {
+              const localIdx = mergedIdx - permStart;
+              if (localIdx >= 0 && localIdx < origTriCount) {
+                bodyPaintedLocal.add(localIdx);
+              }
             }
           }
+        } else {
+          // Re-bake — use stored indices from previous bake
+          // The user painted new faces on the post-bake mesh; those are stored
+          // in body.lastPaintedLocal after the previous bake completed
+          if (body.lastPaintedLocal && body.lastPaintedLocal.size > 0) {
+            bodyPaintedLocal = new Set(body.lastPaintedLocal);
+          }
         }
-
+        console.log(`Body ${bi} startTri:`, body.startTri, 'origTriCount:', origTriCount, 'excludedFaces.size:', excludedFaces.size, 'bodyPaintedLocal.size:', bodyPaintedLocal.size);
         // Build face weights: exclude everything NOT in the painted set.
         // If nothing painted on this body, skip it (handled by wasPainted check).
         const bodyExcluded = body.excludedFaces || new Set();
@@ -5269,19 +5376,19 @@ async function bakeTextures() {
 
           let bodyFaceParentId;
           ({ geometry: bodySubdivided, faceParentId: bodyFaceParentId } = await subdivide(
-            bodyGeoForBake, bodyRefineLength, null, bodyFaceWeights
+            bodyGeoForBake, settings.refineLength, null, bodyFaceWeights
           ));
           if (settings.regularizeEnabled) {
             const reg = regularizeMesh(
               bodySubdivided,
               new Int32Array(bodySubdivided.attributes.position.count / 3),
-              bodyRefineLength, _regularizeOpts()
+              settings.refineLength, _regularizeOpts()
             );
             bodySubdivided.dispose();
             const exclAttr = reg.geometry.attributes.excludeWeight;
             const { geometry: resub, faceParentId: resubParents } = await subdivide(
               reg.geometry,
-              bodyRefineLength * settings.regularizeSecondPassMul,
+              settings.refineLength * settings.regularizeSecondPassMul,
               null, exclAttr ? exclAttr.array : null, { fast: false }
             );
             reg.geometry.dispose();
@@ -5354,6 +5461,11 @@ async function bakeTextures() {
             body.geometry.dispose();
             body.geometry = bodyDisplaced;
             body.hasBeenDisplaced = true;
+            body.lastPaintedLocal = new Set(bodyPaintedLocal);
+            // Also store the merged indices that triggered this bake
+            body.lastPaintedMerged = new Set(
+              [...excludedFaces].filter(idx => idx < triToBody.length && triToBody[idx] === bi)
+            );
             bodyDisplaced = null;
           }
 
