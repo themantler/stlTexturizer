@@ -1099,18 +1099,11 @@ function addCustomSwatch(entry) {
   return swatch;
 }
 
-function resetTextureSmoothing() {
-  settings.textureSmoothing = 0;
-  textureSmoothingSlider.value = 0;
-  textureSmoothingVal.value    = 0;
-}
-
 function selectCustomMap(entry, swatchEl) {
   document.querySelectorAll('.preset-swatch').forEach(s => s.classList.remove('active'));
   swatchEl.classList.add('active');
   activeMapEntry = entry;
   activeMapName.textContent = entry.name;
-  resetTextureSmoothing();
   updatePreview();
 }
 
@@ -1124,10 +1117,6 @@ async function selectPreset(idx, swatchEl, applyDefaults = true) {
   const entry = PRESETS[idx];
   if (!entry) return;
   activeMapName.textContent = entry.name;
-  if (applyDefaults) {
-    resetTextureSmoothing();
-    if (entry.defaultScale != null) _applyScaleU(entry.defaultScale);
-  }
 
   // If full texture is already loaded, use it directly
   if (entry.texture) {
@@ -4740,7 +4729,7 @@ async function handleExport(format = 'stl') {
             ));
             if (exportToken !== myToken) return;
 
-            if (settings.regularizeEnabled && !body.wasRegularized) {
+            if (settings.regularizeEnabled && !body.wasRegularized && bodyExcludedLocal.size > 0) {
               setProgress(0.02 + frac * 0.93, t('progress.regularizing'));
               await yieldFrame();
               const reg = regularizeMesh(
@@ -5268,7 +5257,6 @@ async function bakeTextures() {
       for (let bi = 0; bi < bodies.length; bi++) {
         const body    = bodies[bi];
         const bodyGeo = body.origGeometry || body.geometry;
-        console.log(`Body ${bi} origGeometry:`, body.origGeometry ? 'exists' : 'null', 'triCount:', bodyGeo.attributes.position.array.length/9);		
         if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) continue;
 		// Force garbage collection before each body to clean up heap fragmentation
 		if (window.gc) window.gc();
@@ -5300,7 +5288,6 @@ async function bakeTextures() {
         const previouslyBaked = !!body.wasPainted;
         if (bodyWasPainted) body.wasPainted = true;
         const shouldBake = bodyWasPainted || previouslyBaked;
-        console.log(`Body ${bi} previouslyBaked:`, previouslyBaked, 'bodyWasPainted:', bodyWasPainted, 'shouldBake:', shouldBake, 'body.wasPainted after:', body.wasPainted);
 
         // Skip baking bodies that weren't painted
         if (!shouldBake) continue;
@@ -5339,7 +5326,6 @@ async function bakeTextures() {
             bodyPaintedLocal = new Set(body.lastPaintedLocal);
           }
         }
-        console.log(`Body ${bi} startTri:`, body.startTri, 'origTriCount:', origTriCount, 'excludedFaces.size:', excludedFaces.size, 'bodyPaintedLocal.size:', bodyPaintedLocal.size);
         // Build face weights: exclude everything NOT in the painted set.
         // If nothing painted on this body, skip it (handled by wasPainted check).
         const bodyExcluded = body.excludedFaces || new Set();
