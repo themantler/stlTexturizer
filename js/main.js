@@ -53,6 +53,12 @@ let _falloffGeometry   = null;   // geometry the falloff was last computed for
 
 // ── Exclusion state ───────────────────────────────────────────────────────────
 let excludedFaces      = new Set();   // triangle indices in currentGeometry
+// Merged-geometry triangle indices that carry baked-in displacement, tracked
+// across bakes. Painting-tool adjacency skips these (a textured face only ever
+// keeps the texture it was baked with) while untextured faces of the same
+// body stay selectable without paying for adjacency on millions of displaced
+// triangles.
+let _displacedFaces    = new Set();
 let triangleAdjacency  = null;        // Array from buildAdjacency
 let triangleCentroids  = null;        // Float32Array from buildAdjacency
 let triangleFaceNormals = null;       // Float32Array — local-space unit face normal per tri
@@ -290,7 +296,6 @@ const triLimitWarning  = document.getElementById('tri-limit-warning');
 const bakeBtn          = document.getElementById('bake-btn');
 const bakeBtnQuick = document.getElementById('bake-btn-quick');
 const bakeMaskChk      = document.getElementById('bake-mask-chk');
-const bakeAdjacencyChk     = document.getElementById('bake-build-adjacency-chk');
 const bakeProgress     = document.getElementById('bake-progress');
 const bakeProgBar      = document.getElementById('bake-progress-bar');
 const bakeProgPct      = document.getElementById('bake-progress-pct');
@@ -3033,6 +3038,7 @@ async function handleModelFile(file) {
     currentPoseTrans = originOffset ? originOffset.clone().negate() : new THREE.Vector3(); // mem = orig − centre
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     _geometryWasRegularized = false; // reset when new model loaded
+    _displacedFaces = new Set();     // fresh model — nothing baked yet
     const _extMatch = file.name.match(/\.(stl|obj|3mf)$/i);
     currentStlExt   = _extMatch ? _extMatch[0].toLowerCase() : '';
     checkAmplitudeWarning();
@@ -5256,14 +5262,25 @@ async function bakeTextures() {
 
     // Build the merged preExcluded list (triangles that were just baked).
     // These become the new excludedFaces after adoptBakedGeometry().
+    const wasParentExcluded = faceWeights
+      ? (parentIdx) => faceWeights[parentIdx * 3] > 0.99
+      : () => false;
     let preExcluded = null;
     if (bakeMaskChk.checked) {
       preExcluded = [];
-      const wasParentExcluded = faceWeights
-        ? (parentIdx) => faceWeights[parentIdx * 3] > 0.99
-        : () => false;
       for (let i = 0; i < faceParentId.length; i++) {
         if (!wasParentExcluded(faceParentId[i])) preExcluded.push(i);
+      }
+    }
+
+    // Track which post-bake triangles carry baked-in displacement (this bake's
+    // freshly displaced faces plus earlier ones remapped through the parent
+    // map). Painting-tool adjacency skips them — see _displacedFaces.
+    const displacedNow = new Set();
+    if (faceParentId) {
+      for (let i = 0; i < faceParentId.length; i++) {
+        const parent = faceParentId[i];
+        if (!wasParentExcluded(parent) || _displacedFaces.has(parent)) displacedNow.add(i);
       }
     }
 
@@ -5494,6 +5511,7 @@ async function bakeTextures() {
       preExcludedFaces: preExcluded,
       triToBody:        triToBody || null,
       bodies:           bodies    || null,
+      displacedFaces:   displacedNow,
     });
     succeeded = true;
     setBakeProgress(1.0, t('progress.done'));
@@ -5525,6 +5543,7 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   const _triToBody       = opts.triToBody       || null;
   const _bodies          = opts.bodies          || null;
   const _savedAdjacency  = opts.savedAdjacency  || null;
+  if (opts.displacedFaces) _displacedFaces = opts.displacedFaces;
   // Invalidate any in-flight async operations tied to the previous mesh.
   precisionToken++;
   dispPreviewToken++;
@@ -5607,13 +5626,12 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   setHoverPreview(null);
   _lastHoverTriIdx = -1;
 
-  // Build adjacency only for unpainted bodies — those are the ones the user
-  // will paint next. Painted bodies have massive post-displacement triangle
-  // counts and will never be painted again, so adjacency for them is wasted.
-  // We build adjacency on currentGeometry (the merged post-bake mesh) but
-  // only count triangles belonging to unpainted bodies to decide whether
-  // it's feasible.
-  // Save pre-bake adjacency before nulling — used by unchecked path
+  // Build painting-tool adjacency on every triangle that does NOT carry
+  // baked-in displacement. Textured faces only ever keep the texture they
+  // were baked with, so adjacency there is wasted work — but untextured
+  // faces (even on a partially painted body) stay selectable without paying
+  // for the millions of displaced triangles. Falls back to whole-body
+  // filtering when the per-face displaced set isn't available.
   triangleAdjacency  = null;
   triangleCentroids  = null;
   triangleFaceNormals = null;
@@ -5621,88 +5639,77 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   const bodies = _bodies || get3mfBodies();
   const postBakeTriCount = geometry.attributes.position.count / 3;
 
-  // Count unpainted body triangles using triToBody — the authoritative mapping
-  // built during the bake. Each entry is the body index for that merged triangle.
-  let unpaintedTriCount = 0;
-  if (_triToBody && bodies && bodies.length > 1) {
-    for (let i = 0; i < _triToBody.length; i++) {
-      const bi = _triToBody[i];
-      if (bi >= 0 && bodies[bi] && !bodies[bi].wasPainted) unpaintedTriCount++;
+  // Mark which merged triangles to include in adjacency.
+  let includeTri = null;
+  if (_displacedFaces && _displacedFaces.size > 0) {
+    includeTri = new Uint8Array(postBakeTriCount).fill(1);
+    for (const i of _displacedFaces) {
+      if (i >= 0 && i < postBakeTriCount) includeTri[i] = 0;
     }
   } else if (bodies && bodies.length > 1) {
+    // No per-face map (e.g. legacy project) — fall back to skipping whole
+    // painted/displaced bodies like before.
+    includeTri = new Uint8Array(postBakeTriCount);
     for (const body of bodies) {
-      if (!body.wasPainted && body.geometry) {
-        unpaintedTriCount += (body.geometry.attributes.position.count / 3) | 0;
-      }
+      if (!body || body.wasPainted || body.hasBeenDisplaced || body.startTri == null) continue;
+      for (let t = 0; t < body.triCount; t++) includeTri[body.startTri + t] = 1;
     }
   }
 
-  if (unpaintedTriCount > 0) {
-    if (bakeAdjacencyChk && bakeAdjacencyChk.checked) {
-      // Checked: build on full geometry including displaced bodies
-      const adjData = buildAdjacency(currentGeometry);
-      triangleAdjacency   = adjData.adjacency;
-      triangleCentroids   = adjData.centroids;
-      triangleFaceNormals = adjData.faceNormals;
-      updateMeshDiagnostics(adjData, postBakeTriCount);
-    } else if (_triToBody && bodies && bodies.length > 1) {
+  let includeCount = 0;
+  if (includeTri) for (let i = 0; i < postBakeTriCount; i++) includeCount += includeTri[i];
 
-      // Count unpainted triangles across all bodies
-      let unpaintedCount = 0;
-      for (let bi = 0; bi < bodies.length; bi++) {
-        if (bodies[bi] && !bodies[bi].wasPainted && !bodies[bi].hasBeenDisplaced && bodies[bi].startTri != null) {
-          unpaintedCount += bodies[bi].triCount;
-        }
-      }
-
-      // Extract only unpainted triangles into temp geometry —
-      // skips the 3M+ displaced body triangles entirely
-      const posArr = geometry.attributes.position.array;
-      const unpaintedPos  = new Float32Array(unpaintedCount * 9);
-      const localToMerged = new Int32Array(unpaintedCount);
-      let localTri = 0;
-      for (let bi = 0; bi < bodies.length; bi++) {
-        const body = bodies[bi];
-        if (!body || body.wasPainted || body.hasBeenDisplaced || body.startTri == null) continue;
-        for (let t = 0; t < body.triCount; t++) {
-          const mergedIdx = body.startTri + t;
-          unpaintedPos.set(posArr.subarray(mergedIdx * 9, mergedIdx * 9 + 9), localTri * 9);
-          localToMerged[localTri] = mergedIdx;
-          localTri++;
-        }
-      }
-
-      const tempGeo = new THREE.BufferGeometry();
-      tempGeo.setAttribute('position', new THREE.BufferAttribute(unpaintedPos, 3));
-      const adjData = buildAdjacency(tempGeo);
-      tempGeo.dispose();
-
-      // Map local indices back to merged geometry indices
-      const fullAdj       = new Array(postBakeTriCount).fill(null);
-      const fullCentroids  = new Float32Array(postBakeTriCount * 3);
-      const fullNormals    = new Float32Array(postBakeTriCount * 3);
-
-      for (let lt = 0; lt < unpaintedCount; lt++) {
-        const mergedIdx = localToMerged[lt];
-        fullAdj[mergedIdx] = adjData.adjacency[lt]
-          ? adjData.adjacency[lt].map(n => ({ ...n, neighbor: localToMerged[n.neighbor] }))
-          : null;
-        fullCentroids[mergedIdx * 3]     = adjData.centroids[lt * 3];
-        fullCentroids[mergedIdx * 3 + 1] = adjData.centroids[lt * 3 + 1];
-        fullCentroids[mergedIdx * 3 + 2] = adjData.centroids[lt * 3 + 2];
-        fullNormals[mergedIdx * 3]       = adjData.faceNormals[lt * 3];
-        fullNormals[mergedIdx * 3 + 1]   = adjData.faceNormals[lt * 3 + 1];
-        fullNormals[mergedIdx * 3 + 2]   = adjData.faceNormals[lt * 3 + 2];
-      }
-
-      triangleAdjacency   = fullAdj;
-      triangleCentroids   = fullCentroids;
-      triangleFaceNormals = fullNormals;
-      updateMeshDiagnostics(
-        { adjacency: fullAdj, centroids: fullCentroids, faceNormals: fullNormals },
-        postBakeTriCount
-      );
+  if (includeCount === postBakeTriCount) {
+    // Nothing displaced — full adjacency, no remapping needed.
+    const adjData = buildAdjacency(currentGeometry);
+    triangleAdjacency   = adjData.adjacency;
+    triangleCentroids   = adjData.centroids;
+    triangleFaceNormals = adjData.faceNormals;
+    updateMeshDiagnostics(adjData, postBakeTriCount);
+  } else if (includeCount > 0) {
+    // Extract the paintable triangles into a temp geometry — skips the
+    // displaced triangles entirely — then remap adjacency to merged indices.
+    const posArr = geometry.attributes.position.array;
+    const paintablePos  = new Float32Array(includeCount * 9);
+    const localToMerged = new Int32Array(includeCount);
+    let localTri = 0;
+    for (let mergedIdx = 0; mergedIdx < postBakeTriCount; mergedIdx++) {
+      if (!includeTri[mergedIdx]) continue;
+      paintablePos.set(posArr.subarray(mergedIdx * 9, mergedIdx * 9 + 9), localTri * 9);
+      localToMerged[localTri] = mergedIdx;
+      localTri++;
     }
+
+    const tempGeo = new THREE.BufferGeometry();
+    tempGeo.setAttribute('position', new THREE.BufferAttribute(paintablePos, 3));
+    const adjData = buildAdjacency(tempGeo);
+    tempGeo.dispose();
+
+    // Map local indices back to merged geometry indices
+    const fullAdj       = new Array(postBakeTriCount).fill(null);
+    const fullCentroids  = new Float32Array(postBakeTriCount * 3);
+    const fullNormals    = new Float32Array(postBakeTriCount * 3);
+
+    for (let lt = 0; lt < includeCount; lt++) {
+      const mergedIdx = localToMerged[lt];
+      fullAdj[mergedIdx] = adjData.adjacency[lt]
+        ? adjData.adjacency[lt].map(n => ({ ...n, neighbor: localToMerged[n.neighbor] }))
+        : null;
+      fullCentroids[mergedIdx * 3]     = adjData.centroids[lt * 3];
+      fullCentroids[mergedIdx * 3 + 1] = adjData.centroids[lt * 3 + 1];
+      fullCentroids[mergedIdx * 3 + 2] = adjData.centroids[lt * 3 + 2];
+      fullNormals[mergedIdx * 3]       = adjData.faceNormals[lt * 3];
+      fullNormals[mergedIdx * 3 + 1]   = adjData.faceNormals[lt * 3 + 1];
+      fullNormals[mergedIdx * 3 + 2]   = adjData.faceNormals[lt * 3 + 2];
+    }
+
+    triangleAdjacency   = fullAdj;
+    triangleCentroids   = fullCentroids;
+    triangleFaceNormals = fullNormals;
+    updateMeshDiagnostics(
+      { adjacency: fullAdj, centroids: fullCentroids, faceNormals: fullNormals },
+      postBakeTriCount
+    );
   }
   
   if (excludedFaces.size > 0 && triangleAdjacency) {
