@@ -12,7 +12,7 @@ import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
 import { regularizeMesh }     from './regularize.js';
 import { runExportPipeline, snapBottomToFlat } from './exportPipeline.js';
-import { set3mfBodies, clear3mfBodies, get3mfBodies, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
+import { set3mfBodies, clear3mfBodies, get3mfBodies, exportSTL, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
 import { runFastDiagnostics, runExpensiveDiagnostics,
@@ -1290,7 +1290,10 @@ if (customMapRemoveBtn) {
 }
 
 // ── Welcome popup: open / dismiss ─────────────────────────────────────────────
+// The fork's Electron build removes the welcome overlay from index.html
+// entirely — no-op when the elements are absent.
 function openWelcome({ allowDismissPersist }) {
+  if (!welcomeOverlay || !welcomeDontShow) return;
   welcomeDontShow.checked = false;
   welcomeOverlay.classList.remove('hidden');
   trapFocus(welcomeOverlay);
