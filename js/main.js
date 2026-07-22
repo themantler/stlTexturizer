@@ -5966,21 +5966,16 @@ presetLoadBtn.addEventListener('click', () => {
   const snap = presets[name];
   if (!snap) return;
   applySettingsSnapshot(snap);
-  // Apply regularize settings not covered by applySettingsSnapshot
-  if (snap.regularizeEnabled != null) {
-    settings.regularizeEnabled = snap.regularizeEnabled;
-    regularizeEnabledChk.checked = snap.regularizeEnabled;
-    regularizeDebugRows.classList.toggle('disabled', !snap.regularizeEnabled);
+  // Regularization is always-on now (upstream removed its UI); still honour
+  // numeric regularize tunings saved in older presets.
+  const regKeys = [
+    'regularizeAspectThreshold', 'regularizeSlack', 'regularizeAggressiveSlack',
+    'regularizeExtremeAspect', 'regularizeNormalDeg', 'regularizeAggressiveNormalDeg',
+    'regularizeSecondPassMul',
+  ];
+  for (const key of regKeys) {
+    if (snap[key] != null) settings[key] = snap[key];
   }
-  const regMap = {
-    regularizeAspectThreshold: regAspectThresholdEl,
-    regularizeSlack:            regSlackEl,
-    regularizeAggressiveSlack:  regAggressiveSlackEl,
-    regularizeExtremeAspect:    regExtremeAspectEl,
-    regularizeNormalDeg:        regNormalDegEl,
-    regularizeAggressiveNormalDeg: regAggressiveNormalDegEl,
-    regularizeSecondPassMul:    regSecondPassMulEl,
-  };
 	  // Apply world texture scale settings
 	if (snap.fixedWorldTextureScale != null && fixedWorldTextureToggle) {
 	  settings.fixedWorldTextureScale = snap.fixedWorldTextureScale;
@@ -5991,12 +5986,6 @@ presetLoadBtn.addEventListener('click', () => {
 	  settings.referenceExtentMm = snap.referenceExtentMm;
 	  referenceExtentMmVal.value = snap.referenceExtentMm;
 	}
-  for (const [key, el] of Object.entries(regMap)) {
-    if (snap[key] != null && el) {
-      el.value = snap[key];
-      settings[key] = snap[key];
-    }
-  }
   updatePreview();
 });
 
