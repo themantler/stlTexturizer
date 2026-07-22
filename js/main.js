@@ -4841,8 +4841,10 @@ async function handleExport(format = 'stl') {
 
             // Full pipeline for this body (subdivide → regularize → displace →
             // decimate to the per-body budget → bottom snaps → T-junction
-            // repair). Regularization is skipped only when this body was
-            // already regularized by a bake.
+            // repair). Regularization only runs for bodies actually being
+            // textured (they have painted/masked faces) and never re-runs on
+            // a body a bake already regularized — a second pass would chew
+            // through millions of triangles for nothing.
             const bodyResult = await runOn({
               positions: bodyGeoForExport.attributes.position.array,
               faceWeights,
@@ -4852,7 +4854,7 @@ async function handleExport(format = 'stl') {
               settings: {
                 ...settings,
                 maxTriangles: perBodyBudget,
-                regularizeEnabled: settings.regularizeEnabled && !body.wasRegularized,
+                regularizeEnabled: settings.regularizeEnabled && !body.wasRegularized && bodyExcludedLocal.size > 0,
               },
               bounds: currentBounds,
               regularizeOpts: _regularizeOpts(),
@@ -5315,14 +5317,25 @@ async function bakeTextures() {
     // snaps; no decimation — it would drop the per-face parent mapping needed
     // to remap user exclusions onto the baked output). Worker-first with
     // inline fallback, same as handleExport.
+    //
+    // Regularization here is tightly gated: on multi-body models the merged
+    // mesh is NEVER regularized (the per-body bake loop below regularizes
+    // exactly the bodies being textured, from their coarse originals), and on
+    // single-body models only the FIRST bake regularizes — a re-bake would be
+    // regularizing millions of already-displaced triangles (OOM + minutes of
+    // wasted work).
     const exportEntry = getEffectiveMapEntry();
+    const bakeBodies = get3mfBodies();
+    const bakeRegularize = settings.regularizeEnabled
+      && !_geometryWasRegularized
+      && !(bakeBodies && bakeBodies.length > 1);
     const result = await runPipeline({
       positions: currentGeometry.attributes.position.array,
       faceWeights,
       imageData: exportEntry.imageData,
       imgWidth: exportEntry.width,
       imgHeight: exportEntry.height,
-      settings,
+      settings: { ...settings, regularizeEnabled: bakeRegularize },
       bounds: currentBounds,
       regularizeOpts: _regularizeOpts(),
       mode: 'bake',
@@ -5601,6 +5614,9 @@ async function bakeTextures() {
       bodies:           bodies    || null,
       displacedFaces:   displacedNow,
     });
+    // The adopted mesh is dense displaced output (regularized already where it
+    // mattered) — exports and re-bakes must never regularize it again.
+    _geometryWasRegularized = true;
     succeeded = true;
     setBakeProgress(1.0, t('progress.done'));
     setTimeout(() => { bakeProgress.classList.add('hidden'); setBakeProgress(0, ''); }, 1200);
