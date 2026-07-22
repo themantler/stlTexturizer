@@ -119,13 +119,19 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/></svg>
         </button>
         <span class="project-io-gap" aria-hidden="true"></span>
-        <button id="export-project-btn" class="icon-btn" data-i18n-title="header.exportProject" title="Save project (.bumpmesh)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <button id="export-project-btn" class="icon-btn text-btn" data-i18n-title="header.exportProject" title="Save project (.bumpmesh)">
+          <span data-i18n="header.save">Save</span>
         </button>
         <input type="file" id="import-project-input" accept=".bumpmesh" hidden />
-        <label for="import-project-input" class="icon-btn" data-i18n-title="header.importProject" title="Load project (.bumpmesh)" role="button" tabindex="0">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <label for="import-project-input" class="icon-btn text-btn" data-i18n-title="header.importProject" title="Load project (.bumpmesh)" role="button" tabindex="0">
+          <span data-i18n="header.load">Load</span>
         </label>
+        <div id="load-dialog" class="export-dialog hidden">
+          <p class="export-dialog-title" data-i18n="header.loadDialogTitle">This project includes a model. Load:</p>
+          <label><input type="radio" name="load-mode" id="load-mode-all" value="all" /> <span data-i18n="header.loadModelLabel">Model + settings</span></label>
+          <label><input type="radio" name="load-mode" id="load-mode-settings" value="settings" /> <span data-i18n="header.loadSettingsLabel">Settings only</span></label>
+          <button id="load-go-btn" class="export-go-btn" data-i18n="header.loadGo">Load</button>
+        </div>
         <div id="export-dialog" class="export-dialog hidden">
           <label><input type="checkbox" id="export-settings-chk" checked disabled /> <span data-i18n="header.exportSettingsLabel">Settings</span></label>
           <label><input type="checkbox" id="export-model-chk" checked /> <span data-i18n="header.exportModelLabel">Model (STL)</span></label>
@@ -490,6 +496,7 @@
       <!-- Transform -->
       <section class="panel-section">
         <h2 data-i18n="sections.transform">Transform</h2>
+        <p class="advanced-blurb" data-i18n="labels.scaleManualHint">Type a value in the box for smaller or larger sizes</p>
 
         <div class="form-row">
           <label class="checkbox-label" for="fixed-world-texture"
@@ -573,44 +580,18 @@
           </div>
 
 		  <label><input type="checkbox" id="bake-build-adjacency-chk"> Include displaced bodies when building painting tools </label>
-			
-          <h3 class="panel-subsection-heading">Regularize Mesh ⓘ</h3>
-          <p class="advanced-blurb">After subdividing, collapse sliver triangles produced by CAD-tessellation needles (fan-tessellated faces, near-collinear "flat slivers") so each output triangle samples coherent texels. A second subdivide brings stretched edges back near the resolution target, while masked surfaces are skipped.</p>
+
+          <h3 class="panel-subsection-heading" data-i18n="ui.harvestFlatHeading">Harvest Flat Faces</h3>
+          <p class="advanced-blurb" data-i18n="ui.harvestFlatDesc">When decimation reaches the triangle limit there are often still flat faces left that cost almost nothing to remove. With this on, decimation keeps collapsing them past the limit — as long as each collapse moves the surface less than the tolerance below — saving extra triangles without losing visible detail.</p>
           <div class="form-row">
-            <label class="checkbox-label" for="regularize-enabled-chk">
-              <input type="checkbox" id="regularize-enabled-chk" checked />
-              <span data-i18n="ui.enableMeshRegularization">Enable mesh regularization</span>
+            <label class="checkbox-label" for="harvest-flat-chk">
+              <input type="checkbox" id="harvest-flat-chk" checked />
+              <span data-i18n="ui.harvestFlat">Keep collapsing flat faces below the triangle limit</span>
             </label>
           </div>
-          <div id="regularize-debug-rows" class="regularize-debug-rows">
-            <div class="form-row slider-row">
-              <label for="reg-aspect-threshold" title="Triangles with thinness (longest edge / shortest altitude) above this become collapse candidates. Lower = more aggressive sliver detection.">Sliver threshold</label>
-              <input type="number" id="reg-aspect-threshold" class="val" min="1" max="50" step="0.1" value="5" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-slack" title="Base edge cap = refineLength × slack. Surviving collapses must keep new edges below this.">Edge slack (base)</label>
-              <input type="number" id="reg-slack" class="val" min="1" max="20" step="0.1" value="3.0" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-aggressive-slack" title="Loose edge cap used when at least one wing of the collapse is an extreme sliver. Higher = more aggressive sliver clearing, larger stretched edges (re-subdivided afterwards).">Edge slack (aggressive)</label>
-              <input type="number" id="reg-aggressive-slack" class="val" min="1" max="20" step="0.1" value="8.0" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-extreme-aspect" title="Thinness above which a wing counts as 'extreme', triggering the aggressive edge & normal caps. Higher = more conservative (protects fillets).">Extreme sliver threshold</label>
-              <input type="number" id="reg-extreme-aspect" class="val" min="1" max="100" step="0.5" value="8" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-normal-deg" title="Maximum normal swing per collapse (degrees). Lower = better feature preservation.">Normal change limit (°)</label>
-              <input type="number" id="reg-normal-deg" class="val" min="0" max="90" step="1" value="15" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-aggressive-normal-deg" title="Looser normal swing limit when both wings are extreme slivers. Higher = better chain-sliver dissolution, risk of bending fine fillets.">Aggressive normal limit (°)</label>
-              <input type="number" id="reg-aggressive-normal-deg" class="val" min="0" max="90" step="1" value="25" />
-            </div>
-            <div class="form-row slider-row">
-              <label for="reg-second-pass-mul" title="Cap for the post-regularize subdivide = refineLength × this. Higher = fewer triangles but uneven sampling near sliver-cleared regions.">Re-subdivide cap (× target)</label>
-              <input type="number" id="reg-second-pass-mul" class="val" min="1" max="8" step="0.1" value="1.1" />
-            </div>
+          <div class="form-row slider-row" id="harvest-tol-row">
+            <label for="harvest-tol" title="Maximum surface deviation a flat-face collapse may introduce. Higher = more triangles removed, but larger deviation. ~0.005 mm is imperceptible for FDM; raise it to remove more." data-i18n-title="tooltips.harvestTol" data-i18n="ui.harvestTol">Flat tolerance (mm)</label>
+            <input type="number" id="harvest-tol" class="val" min="0" max="1" step="0.005" value="0.005" />
           </div>
         </div>
       </section>
@@ -634,7 +615,13 @@
         <div id="smart-res-info" class="smart-res-info hidden"></div>
         <div class="form-row slider-row">
           <label for="refine-length" data-i18n="labels.resolution" data-i18n-title="tooltips.resolution" title="Edges longer than this value will be split during export">Resolution (mm)</label>
-          <input type="range" id="refine-length" min="0.01" max="2" step="0.01" value="1" />
+          <div class="slider-stack">
+            <input type="range" id="refine-length" min="0.01" max="2" step="0.01" value="1" />
+            <div class="slider-captions">
+              <span data-i18n="labels.resCoarse">coarse</span>
+              <span data-i18n="labels.resFine">fine</span>
+            </div>
+          </div>
           <input type="number" class="val" id="refine-length-val" value="1" min="0.01" max="100" step="0.01" data-wheel-decimals="2" />
         </div>
         <div id="resolution-warning" class="resolution-warning hidden" data-i18n="warnings.resolutionTooCoarse">

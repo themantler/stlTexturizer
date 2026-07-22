@@ -61,9 +61,15 @@ function buildAxesIndicator(size) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, 32, 32);
+    // depthWrite OFF + renderOrder above the wireframe overlay (3): label
+    // quads must not stamp their rectangle into the depth buffer, or they
+    // punch line-free holes into the wireframe drawn after them. Rendered
+    // last, the transparent label background lets the wireframe shine
+    // through while the glyph stays readable on top.
     const sprite = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c) }),
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }),
     );
+    sprite.renderOrder = 4;
     sprite.position.copy(dir.clone().multiplyScalar(r * 1.18));
     sprite.scale.set(r * 0.32, r * 0.32, 1);
     group.add(sprite);
@@ -89,10 +95,14 @@ function buildDimensionLabel(text, hex, worldW, worldH) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 128, 32);
+  // depthWrite OFF + renderOrder above the wireframe overlay (3) — same
+  // reasoning as the axis label sprites: a depth-writing transparent quad
+  // drawn before the wireframe punches a line-free hole into it.
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(worldW, worldH),
-    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, side: THREE.DoubleSide }),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, side: THREE.DoubleSide, depthWrite: false }),
   );
+  mesh.renderOrder = 4;
   return mesh;
 }
 

@@ -734,6 +734,30 @@ main {
   background: var(--accent); border: none; cursor: grab;
 }
 
+/* Resolution slider runs coarse → fine left-to-right, so the mm value (where
+   smaller = finer) decreases as you drag right. The coarse/fine captions below
+   carry the direction; the descending number is intentional. */
+.slider-stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.slider-stack input[type="range"] {
+  flex: 0 0 auto;
+  width: 100%;
+}
+/* Resolution only: min (0.01 mm, fine) on the right, max (2 mm, coarse) on the left. */
+#refine-length { direction: rtl; }
+.slider-captions {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  line-height: 1;
+}
+
 .val {
   flex: 0 0 52px;
   text-align: right;
@@ -1330,24 +1354,7 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
 /* Hide utility (used by JS to show/hide exclusion sub-rows) */
 .form-row.hidden { display: none; }
 
-/* Regularize debug knob group — visually nested under the toggle */
-.regularize-debug-rows {
-  margin: 4px 0 8px 16px;
-  padding-left: 8px;
-  border-left: 2px solid var(--border);
-}
-.regularize-debug-rows .form-row {
-  margin: 4px 0;
-}
-.regularize-debug-rows label {
-  flex: 1;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.regularize-debug-rows input[type="number"] {
-  width: 80px;
-}
-.regularize-debug-rows.disabled {
+#harvest-tol-row.disabled {
   opacity: 0.45;
   pointer-events: none;
 }
@@ -1805,6 +1812,16 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   cursor: not-allowed;
 }
 
+.project-io .icon-btn.text-btn {
+  width: auto;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
 .export-dialog {
   position: absolute;
   top: calc(100% + 6px);
@@ -1835,9 +1852,18 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   user-select: none;
 }
 
-.export-dialog label input[type="checkbox"] {
+.export-dialog label input[type="checkbox"],
+.export-dialog label input[type="radio"] {
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.export-dialog-title {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim, var(--text));
+  max-width: 200px;
 }
 
 .export-dialog label input:disabled {

@@ -11,10 +11,9 @@
  */
 
 import * as THREE from 'three';
+import { QuantizedPointMap } from './meshIndex.js';
 
 const QUANT = 1e4;
-const quantKey = (x, y, z) =>
-  `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
 
 // ── Adjacency & centroids ─────────────────────────────────────────────────────
 
@@ -67,45 +66,18 @@ export function buildAdjacency(geometry) {
     boundRadii[t] = Math.sqrt(Math.max(dA, dB, dC));
   }
 
-  // Vertex dedup using numeric spatial hash instead of string-keyed Map.
-  // This avoids Map size limits and string allocation overhead for large meshes.
-  const vertCount = triCount * 3;
-  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(vertCount * 2)));
-  const hashTable = new Int32Array(HASH_SIZE).fill(-1);
-  const hashNext  = new Int32Array(vertCount).fill(-1);
-  const vertId    = new Uint32Array(vertCount);
-  // Cache quantized coords to avoid repeated attribute lookups in probe chain
-  const qxArr = new Int32Array(vertCount);
-  const qyArr = new Int32Array(vertCount);
-  const qzArr = new Int32Array(vertCount);
+  // Build edge → triangle list (two triangles share an edge iff they share two
+  // vertex positions after quantization-based deduplication).
+  // Vertex-dedup pass: assign a numeric ID to each unique quantised position.
+  const posToId = new QuantizedPointMap(QUANT, Math.min(triCount * 3, 1 << 22));
   let nextId = 0;
-
-  for (let i = 0; i < vertCount; i++) {
-    const qx = Math.round(posAttr.getX(i) * QUANT);
-    const qy = Math.round(posAttr.getY(i) * QUANT);
-    const qz = Math.round(posAttr.getZ(i) * QUANT);
-    qxArr[i] = qx; qyArr[i] = qy; qzArr[i] = qz;
-    const h = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
-    let found = -1;
-    let probe = hashTable[h];
-    while (probe !== -1) {
-      if (qxArr[probe] === qx && qyArr[probe] === qy && qzArr[probe] === qz) {
-        found = probe; break;
-      }
-      probe = hashNext[probe];
-    }
-    if (found === -1) {
-      hashNext[i] = hashTable[h];
-      hashTable[h] = i;
-      vertId[i] = nextId++;
-    } else {
-      vertId[i] = vertId[found];
-    }
+  const vertId = new Uint32Array(triCount * 3);
+  for (let i = 0; i < triCount * 3; i++) {
+    const id = posToId.getOrSet(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i), nextId);
+    if (posToId.inserted) nextId++;
+    vertId[i] = id;
   }
-  
-  // Build edge map using numeric keys — no string allocations
-  // numEdgeKey produces a unique number for each undirected edge
-  const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
+
   // Build edge map using typed array hash to avoid Map size limits
   const EDGE_HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
   const edgeHashTable = new Int32Array(EDGE_HASH_SIZE).fill(-1);

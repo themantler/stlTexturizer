@@ -4,12 +4,17 @@
 export const TRANSLATIONS = {
   en: { 'lang.name': 'English' },
   de: { 'lang.name': 'Deutsch' },
+  da: { 'lang.name': 'Dansk' },
   it: { 'lang.name': 'Italiano' },
   es: { 'lang.name': 'Español' },
   pt: { 'lang.name': 'Português' },
   fr: { 'lang.name': 'Français' },
+  tr: { 'lang.name': 'Türkçe' },
   ja: { 'lang.name': '日本語' },
   ko: { 'lang.name': '한국어' },
+  uk: { 'lang.name': 'Українська' },
+  ru: { 'lang.name': 'Русский' },
+  zh: { 'lang.name': '简体中文' },
 };
 
 // ── Module state ──────────────────────────────────────────────────────────────

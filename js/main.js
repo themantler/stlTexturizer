@@ -11,14 +11,14 @@ import { loadAllThumbnails, loadFullPreset, loadCustomTexture, IMAGE_PRESETS }  
 import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
 import { regularizeMesh }     from './regularize.js';
-import { applyDisplacement }  from './displacement.js';
-import { decimate }           from './decimation.js';
+import { runExportPipeline, snapBottomToFlat } from './exportPipeline.js';
 import { set3mfBodies, clear3mfBodies, get3mfBodies, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
 import { runFastDiagnostics, runExpensiveDiagnostics,
          getEdgePositions, getShellAssignments } from './meshValidation.js';
 import { t, initLang, setLang, getLang, applyTranslations, TRANSLATIONS } from './i18n.js';
+import { QuantizedPointMap } from './meshIndex.js';
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -26,7 +26,17 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 let currentGeometry   = null;   // original loaded geometry
 let _geometryWasRegularized = false;
 let currentBounds     = null;   // bounds of the original geometry
+// Forward rigid transform from the file's original coordinates to the in-app
+// (centered, possibly rotated) working space: mem = poseRot·orig + poseTrans.
+// Import centering, in-app rotation, and place-on-face all fold into it; the
+// full INVERSE is applied on export so files leave BumpMesh in their original
+// position AND orientation (issue #82) — in-app rotation is a texturing aid,
+// not part of the output.
+let currentPoseRot    = new THREE.Quaternion();
+let currentPoseTrans  = new THREE.Vector3();
+let _rotatePoseSnapshot = null; // { rot, trans } captured on rotate-mode entry, restored by the reset button alongside _rotateOriginalPositions
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
+let currentStlExt     = '.stl';  // source file extension (.stl/.obj/.3mf), for the stats line
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
 let _lastCustomMap    = null;   // most recent uploaded/imported custom-map entry, kept across preset switches so the thumbnail can re-activate it
 let previewMaterial   = null;
@@ -98,6 +108,8 @@ const settings = {
   referenceExtentMm: 200,
   noDownwardZ: false,
   smoothBottom: true,
+  harvestFlatFaces: true,
+  harvestTol: 0.005,
   useDisplacement: false,
   // Cylindrical-mode controls.
   // null/undefined → derive from bounds (preserves legacy / non-cylindrical behavior).
@@ -106,11 +118,11 @@ const settings = {
   cylinderCenterY:  null,
   cylinderRadius:   null,
   cylinderPanelMinimized: false,
-  // Regularize Mesh (Advanced/Beta).  Two-step pipeline applied after the
-  // initial subdivide: collapse sliver chains, then re-subdivide stretched
-  // edges back to a configurable multiple of refineLength.  All knobs here
-  // mirror regularize.js opts; second-pass cap is for the post-regularize
-  // subdivide step in main.js.
+  // Regularize Mesh.  Two-step pipeline applied after the initial subdivide:
+  // collapse sliver chains, then re-subdivide stretched edges back to a
+  // multiple of refineLength.  Always on with these standard values — the
+  // knobs here mirror regularize.js opts; second-pass cap is for the
+  // post-regularize subdivide step in main.js.
   regularizeEnabled:        true,
   regularizeAspectThreshold: 5,
   regularizeSlack:           3.0,
@@ -241,6 +253,15 @@ const customMapRow      = document.getElementById('custom-map-row');
 const customMapSwatch   = document.getElementById('custom-map-swatch');
 const customMapRemoveBtn = document.getElementById('custom-map-remove');
 const meshInfo       = document.getElementById('mesh-info');
+
+// Render the bottom-left mesh stats line, prefixed with the loaded model's
+// name (currentStlName, extension-stripped) so the user can see which file
+// the stats belong to.
+function _setMeshInfo(triCount, mb, sx, sy, sz) {
+  const stats = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+  const fileName = currentStlName ? `${currentStlName}${currentStlExt}` : '';
+  meshInfo.textContent = fileName ? `${fileName} · ${stats}` : stats;
+}
 const exportBtn        = document.getElementById('export-btn');
 const export3mfBtn     = document.getElementById('export-3mf-btn');
 const exportProgress   = document.getElementById('export-progress');
@@ -331,15 +352,9 @@ function refreshReferenceExtentUi() {
 
 const noDownwardZChk         = document.getElementById('no-downward-z-chk');
 const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
-const regularizeEnabledChk   = document.getElementById('regularize-enabled-chk');
-const regularizeDebugRows    = document.getElementById('regularize-debug-rows');
-const regAspectThresholdEl   = document.getElementById('reg-aspect-threshold');
-const regSlackEl             = document.getElementById('reg-slack');
-const regAggressiveSlackEl   = document.getElementById('reg-aggressive-slack');
-const regExtremeAspectEl     = document.getElementById('reg-extreme-aspect');
-const regNormalDegEl         = document.getElementById('reg-normal-deg');
-const regAggressiveNormalDegEl = document.getElementById('reg-aggressive-normal-deg');
-const regSecondPassMulEl     = document.getElementById('reg-second-pass-mul');
+const harvestFlatChk         = document.getElementById('harvest-flat-chk');
+const harvestTolInput        = document.getElementById('harvest-tol');
+const harvestTolRow          = document.getElementById('harvest-tol-row');
 
 // ── Exclusion panel DOM refs ──────────────────────────────────────────────────
 const exclBrushBtn        = document.getElementById('excl-brush-btn');
@@ -387,7 +402,7 @@ const imprintClose   = document.getElementById('imprint-close');
 // ── Welcome / What's New popup ───────────────────────────────────────────────
 // Bump this date whenever the "What's New" bullets in index.html change to
 // re-show the popup to all returning visitors who previously dismissed it.
-const WELCOME_LAST_UPDATED = '2026-05-02';
+const WELCOME_LAST_UPDATED = '2026-06-10';
 const WELCOME_STORAGE_KEY  = 'stlt-welcome-seen';
 const welcomeLink     = document.getElementById('welcome-link');
 const welcomeOverlay  = document.getElementById('welcome-overlay');
@@ -945,7 +960,7 @@ function populateLanguageSelector() {
       const sx = currentBounds.size.x.toFixed(2);
       const sy = currentBounds.size.y.toFixed(2);
       const sz = currentBounds.size.z.toFixed(2);
-      meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+      _setMeshInfo(triCount, mb, sx, sy, sz);
       refreshExclusionOverlay();
       if (lastFastDiag) renderFastDiag(lastFastDiag);
       if (lastAdvancedDiag) renderAdvancedDiag(lastAdvancedDiag);
@@ -1535,31 +1550,19 @@ function wireEvents() {
     settings.smoothBottom = smoothBottomChk.checked;
     // No preview rebuild needed — the snap is a final-export step only.
   });
-
-  // Regularize (Advanced/Beta) — toggle + 7 debug knobs.  The toggle disables
-  // the entire regularize+resub pipeline; the knobs adjust regularize.js opts.
-  regularizeEnabledChk.checked = settings.regularizeEnabled;
-  regularizeDebugRows.classList.toggle('disabled', !settings.regularizeEnabled);
-  regularizeEnabledChk.addEventListener('change', () => {
-    settings.regularizeEnabled = regularizeEnabledChk.checked;
-    regularizeDebugRows.classList.toggle('disabled', !settings.regularizeEnabled);
-    updatePreview();
+  harvestFlatChk.checked = settings.harvestFlatFaces;
+  harvestTolRow.classList.toggle('disabled', !settings.harvestFlatFaces);
+  harvestFlatChk.addEventListener('change', () => {
+    settings.harvestFlatFaces = harvestFlatChk.checked;
+    harvestTolRow.classList.toggle('disabled', !settings.harvestFlatFaces);
+    // No preview rebuild needed — harvesting only affects the final decimation.
   });
-  // Helper — wire a number input to a settings key, schedule a preview update.
-  const _wireRegNumber = (el, key, parser = parseFloat) => {
-    el.value = settings[key];
-    el.addEventListener('input', () => {
-      const v = parser(el.value);
-      if (Number.isFinite(v)) { settings[key] = v; updatePreview(); }
-    });
-  };
-  _wireRegNumber(regAspectThresholdEl,    'regularizeAspectThreshold');
-  _wireRegNumber(regSlackEl,              'regularizeSlack');
-  _wireRegNumber(regAggressiveSlackEl,    'regularizeAggressiveSlack');
-  _wireRegNumber(regExtremeAspectEl,      'regularizeExtremeAspect');
-  _wireRegNumber(regNormalDegEl,          'regularizeNormalDeg');
-  _wireRegNumber(regAggressiveNormalDegEl,'regularizeAggressiveNormalDeg');
-  _wireRegNumber(regSecondPassMulEl,      'regularizeSecondPassMul');
+  harvestTolInput.value = settings.harvestTol;
+  harvestTolInput.addEventListener('input', () => {
+    const v = parseFloat(harvestTolInput.value);
+    if (Number.isFinite(v) && v >= 0) settings.harvestTol = v;
+    // No preview rebuild needed — harvesting only affects the final decimation.
+  });
 
   dispPreviewToggle.addEventListener('change', () => {
     toggleDisplacementPreview(dispPreviewToggle.checked);
@@ -1581,9 +1584,13 @@ function wireEvents() {
   rotateResetBtn.addEventListener('click', () => {
     if (!currentGeometry || !_rotateOriginalPositions) return;
 
-    // Restore original vertex positions
+    // Restore original vertex positions and the matching pose transform
     currentGeometry.attributes.position.array.set(_rotateOriginalPositions);
     currentGeometry.attributes.position.needsUpdate = true;
+    if (_rotatePoseSnapshot) {
+      currentPoseRot.copy(_rotatePoseSnapshot.rot);
+      currentPoseTrans.copy(_rotatePoseSnapshot.trans);
+    }
     currentGeometry.computeVertexNormals();
     if (currentGeometry.attributes.faceNormal) {
       currentGeometry.deleteAttribute('faceNormal');
@@ -1635,10 +1642,12 @@ function wireEvents() {
 
   // ── Export ──
   const startExport = (format) => {
-    if (sessionStorage.getItem('stlt-no-sponsor') === '1') {
-      handleExport(format);
-      return;
-    }
+    // Start the export immediately — the pipeline runs in the worker, so the
+    // sponsor overlay sits on top of a live progress bar instead of delaying
+    // the work until it's dismissed.
+    handleExport(format);
+
+    if (sessionStorage.getItem('stlt-no-sponsor') === '1') return;
     const overlay = document.getElementById('sponsor-overlay');
     const closeBtn = document.getElementById('sponsor-close');
     const storeLink = overlay.querySelector('.sponsor-link');
@@ -1650,11 +1659,9 @@ function wireEvents() {
         sessionStorage.setItem('stlt-no-sponsor', '1');
       }
       overlay.classList.add('hidden');
-      handleExport(format);
     };
 
     closeBtn.onclick = dismiss;
-    // Also start processing when the user clicks through to the store
     storeLink.onclick = () => setTimeout(dismiss, 150);
   };
   exportBtn.addEventListener('click', () => startExport('stl'));
@@ -2385,11 +2392,16 @@ function handlePlaceOnFaceClick(e) {
     pos[i + 2] = v.z;
   }
 
+  // Fold the rotation into the pose transform (undone again on export).
+  currentPoseRot.premultiply(quat).normalize();
+  currentPoseTrans.applyQuaternion(quat);
+
   // Re-center geometry
   currentGeometry.computeBoundingBox();
   const center = new THREE.Vector3();
   currentGeometry.boundingBox.getCenter(center);
   currentGeometry.translate(-center.x, -center.y, -center.z);
+  currentPoseTrans.sub(center);
 
   // Recompute normals from scratch (fixes lighting + angle masking)
   currentGeometry.computeVertexNormals();
@@ -2468,7 +2480,7 @@ function handlePlaceOnFaceClick(e) {
   const sx = currentBounds.size.x.toFixed(2);
   const sy = currentBounds.size.y.toFixed(2);
   const sz = currentBounds.size.z.toFixed(2);
-  meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+  _setMeshInfo(triCount, mb, sx, sy, sz);
 
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
@@ -2500,9 +2512,10 @@ function toggleRotateMode(active) {
     if (placeOnFaceActive) togglePlaceOnFace(false);
     if (exclusionTool) setExclusionTool(null);
 
-    // Snapshot original positions for reset
+    // Snapshot original positions (and the matching pose transform) for reset
     if (currentGeometry) {
       _rotateOriginalPositions = new Float32Array(currentGeometry.attributes.position.array);
+      _rotatePoseSnapshot = { rot: currentPoseRot.clone(), trans: currentPoseTrans.clone() };
     }
     rotateAngles = { x: 0, y: 0, z: 0 };
     rotateXInput.value = '0'; rotateYInput.value = '0'; rotateZInput.value = '0';
@@ -2512,6 +2525,7 @@ function toggleRotateMode(active) {
   } else {
     setRotationGizmo(false);
     _rotateOriginalPositions = null;
+    _rotatePoseSnapshot = null;
 
     // Full rebuild now that rotation is done
     _rotateFinalize();
@@ -2582,6 +2596,12 @@ function _rotateGeometry(quat) {
     pos[i + 1] = v.y;
     pos[i + 2] = v.z;
   }
+
+  // Fold the rotation into the pose transform (undone again on export).
+  currentPoseRot.premultiply(quat).normalize();
+  currentPoseTrans.applyQuaternion(quat);
+
+  // Recompute normals
   currentGeometry.computeVertexNormals();
   if (currentGeometry.attributes.faceNormal) {
     currentGeometry.deleteAttribute('faceNormal');
@@ -2598,12 +2618,13 @@ function _rotateGeometry(quat) {
 function _rotateFinalize() {
   if (!currentGeometry) return;
 
-  // Re-center
+  // Re-center, folding the shift into the pose transform (undone on export).
   currentGeometry.computeBoundingBox();
   const center = new THREE.Vector3();
   currentGeometry.boundingBox.getCenter(center);
   currentGeometry.translate(-center.x, -center.y, -center.z);
   currentGeometry.attributes.position.needsUpdate = true;
+  currentPoseTrans.sub(center);
 
   // Full refresh
   currentBounds = computeBounds(currentGeometry);
@@ -2910,7 +2931,10 @@ function loadDefaultCube() {
 
   currentGeometry = geo;
   currentBounds   = computeBounds(geo);
+  currentPoseRot   = new THREE.Quaternion(); // authored at the origin — nothing to restore
+  currentPoseTrans = new THREE.Vector3();
   currentStlName  = 'cube_50x50x50';
+  currentStlExt   = '.stl';
   checkAmplitudeWarning();
 
   loadGeometry(geo);
@@ -2964,7 +2988,7 @@ function loadDefaultCube() {
   const sx = currentBounds.size.x.toFixed(2);
   const sy = currentBounds.size.y.toFixed(2);
   const sz = currentBounds.size.z.toFixed(2);
-  meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+  _setMeshInfo(triCount, mb, sx, sy, sz);
 
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
@@ -2977,7 +3001,7 @@ function loadDefaultCube() {
 async function handleModelFile(file) {
   _undoApplyDepth++;
   try {
-    const { geometry, bounds, nanCount, degenerateCount } = await loadModelFile(file);
+    const { geometry, bounds, nanCount, degenerateCount, originOffset } = await loadModelFile(file);
 
     // Invalidate any in-flight async operations tied to the previous model
     precisionToken++;
@@ -2987,8 +3011,12 @@ async function handleModelFile(file) {
 
     currentGeometry = geometry;
     currentBounds   = bounds;
+    currentPoseRot   = new THREE.Quaternion();
+    currentPoseTrans = originOffset ? originOffset.clone().negate() : new THREE.Vector3(); // mem = orig − centre
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     _geometryWasRegularized = false; // reset when new model loaded
+    const _extMatch = file.name.match(/\.(stl|obj|3mf)$/i);
+    currentStlExt   = _extMatch ? _extMatch[0].toLowerCase() : '';
     checkAmplitudeWarning();
 
     // Log (but don't block the user with an alert) if bad triangles were
@@ -3119,7 +3147,7 @@ async function handleModelFile(file) {
     const sx = bounds.size.x.toFixed(2);
     const sy = bounds.size.y.toFixed(2);
     const sz = bounds.size.z.toFixed(2);
-    meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+    _setMeshInfo(triCount, mb, sx, sy, sz);
 
     exportBtn.disabled = (activeMapEntry === null);
     export3mfBtn.disabled = (activeMapEntry === null);
@@ -3516,15 +3544,19 @@ function computeBoundaryFalloffAttr(geometry, userMaskArr) {
     faceMask[t] = angleMask;
   }
 
-  // Build per-unique-position map and identify boundary positions.
+  // Weld vertices to unique-position ids and accumulate per-id areas.
+  // Arrays are pre-sized to posCount (upper bound on unique count); extra
+  // tail slots stay unused — same pattern as displacement.js.
   const QUANT = 1e4;
-  const posKey = (x, y, z) =>
-    `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
-
-  const posFromKey = new Map();  // posKey → [x, y, z]
-  // Per-position: [maskedArea, totalArea] to find boundary vertices
-  const maskFracMap = new Map();
-  const userMaskAreaMap = new Map(); // posKey → area of user-masked faces
+  const weldMap = new QuantizedPointMap(QUANT, Math.min(posCount, 1 << 22));
+  let nUnique = 0;
+  const vertId = new Uint32Array(posCount);
+  const idPosX = new Float64Array(posCount);  // first-occurrence position per id
+  const idPosY = new Float64Array(posCount);
+  const idPosZ = new Float64Array(posCount);
+  const maskedArea   = new Float64Array(posCount);
+  const totalArea    = new Float64Array(posCount);
+  const userMaskArea = new Float64Array(posCount);
   const tmpV = new THREE.Vector3();
   const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
   const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), fn = new THREE.Vector3();
@@ -3541,32 +3573,26 @@ function computeBoundaryFalloffAttr(geometry, userMaskArr) {
 
     for (let v = 0; v < 3; v++) {
       tmpV.fromBufferAttribute(posAttr, t * 3 + v);
-      const k = posKey(tmpV.x, tmpV.y, tmpV.z);
-      if (!posFromKey.has(k)) posFromKey.set(k, [tmpV.x, tmpV.y, tmpV.z]);
-      const mf = maskFracMap.get(k);
-      if (mf) {
-        if (masked) mf[0] += area;
-        mf[1] += area;
-      } else {
-        maskFracMap.set(k, [masked ? area : 0, area]);
+      const id = weldMap.getOrSet(tmpV.x, tmpV.y, tmpV.z, nUnique);
+      if (weldMap.inserted) {
+        nUnique++;
+        idPosX[id] = tmpV.x; idPosY[id] = tmpV.y; idPosZ[id] = tmpV.z;
       }
+      vertId[t * 3 + v] = id;
+      if (masked) maskedArea[id] += area;
+      totalArea[id] += area;
       // Track user-mask area per position to classify boundary type
-      if (isUserMasked[t]) {
-        const prev = userMaskAreaMap.get(k) || 0;
-        userMaskAreaMap.set(k, prev + area);
-      }
+      if (isUserMasked[t]) userMaskArea[id] += area;
     }
   }
 
   // Boundary positions: shared between masked and non-masked faces.
   // Each entry: [x, y, z, maskType] where maskType 0 = user, 1 = angle.
   const boundaryPositions = [];
-  for (const [k, pos] of posFromKey) {
-    const mf = maskFracMap.get(k);
-    const frac = mf[1] > 0 ? mf[0] / mf[1] : 0;
+  for (let id = 0; id < nUnique; id++) {
+    const frac = totalArea[id] > 0 ? maskedArea[id] / totalArea[id] : 0;
     if (frac > 0 && frac < 1) {
-      const userArea = userMaskAreaMap.get(k) || 0;
-      boundaryPositions.push([pos[0], pos[1], pos[2], userArea > 0 ? 0 : 1]);
+      boundaryPositions.push([idPosX[id], idPosY[id], idPosZ[id], userMaskArea[id] > 0 ? 0 : 1]);
     }
   }
 
@@ -3610,23 +3636,22 @@ function computeBoundaryFalloffAttr(geometry, userMaskArr) {
   const searchY = Math.ceil(falloff / gDy);
   const searchZ = Math.ceil(falloff / gDz);
 
-  // Compute per-unique-position falloff factor and mask type
-  const falloffCache = new Map(); // posKey → factor [0,1]
-  const maskTypeCache = new Map(); // posKey → 0 (user mask) or 1 (angle mask)
-  for (const [k, pos] of posFromKey) {
-    const mf = maskFracMap.get(k);
-    const frac = mf[1] > 0 ? mf[0] / mf[1] : 0;
+  // Compute per-unique-position falloff factor and mask type.
+  // -1 = unset (keep the 1.0 default written into the attribute arrays).
+  const falloffById  = new Float32Array(nUnique).fill(-1);
+  const maskTypeById = new Float32Array(nUnique).fill(-1);
+  for (let id = 0; id < nUnique; id++) {
+    const frac = totalArea[id] > 0 ? maskedArea[id] / totalArea[id] : 0;
     if (frac >= 1) continue; // fully masked vertex — keep 1.0 (mask zeroes it anyway)
     // Boundary vertices (shared between masked and unmasked faces) are AT
     // the boundary → distance 0 → falloff factor 0.
     if (frac > 0) {
-      falloffCache.set(k, 0);
-      const userArea = userMaskAreaMap.get(k) || 0;
-      maskTypeCache.set(k, userArea > 0 ? 0 : 1);
+      falloffById[id] = 0;
+      maskTypeById[id] = userMaskArea[id] > 0 ? 0 : 1;
       continue;
     }
 
-    const px = pos[0], py = pos[1], pz = pos[2];
+    const px = idPosX[id], py = idPosY[id], pz = idPosZ[id];
     const cix = Math.max(0, Math.min(gRes - 1, Math.floor((px - gMinX) / gDx)));
     const ciy = Math.max(0, Math.min(gRes - 1, Math.floor((py - gMinY) / gDy)));
     const ciz = Math.max(0, Math.min(gRes - 1, Math.floor((pz - gMinZ) / gDz)));
@@ -3655,17 +3680,16 @@ function computeBoundaryFalloffAttr(geometry, userMaskArr) {
     const dist = Math.sqrt(minDist2);
     const factor = Math.min(1, dist / falloff);
     if (factor < 1) {
-      falloffCache.set(k, factor);
-      maskTypeCache.set(k, nearestType);
+      falloffById[id] = factor;
+      maskTypeById[id] = nearestType;
     }
   }
 
-  // Write per-vertex attributes
+  // Write per-vertex attributes via the welded id (no re-keying pass)
   for (let i = 0; i < posCount; i++) {
-    tmpV.fromBufferAttribute(posAttr, i);
-    const k = posKey(tmpV.x, tmpV.y, tmpV.z);
-    if (falloffCache.has(k)) falloffArr[i] = falloffCache.get(k);
-    if (maskTypeCache.has(k)) maskTypeArr[i] = maskTypeCache.get(k);
+    const id = vertId[i];
+    if (falloffById[id] >= 0) falloffArr[i] = falloffById[id];
+    if (maskTypeById[id] >= 0) maskTypeArr[i] = maskTypeById[id];
   }
 
   if (reuseFalloff) existingFalloff.needsUpdate = true;
@@ -3711,28 +3735,34 @@ function computeBoundaryEdges(geometry, userMaskArr) {
   }
 
   const QUANT = 1e4;
-  const pk = (x, y, z) =>
-    `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
-  const ek = (k1, k2) => k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1;
+  const weldMap = new QuantizedPointMap(QUANT, Math.min(posCount, 1 << 22));
+  let nUnique = 0;
   const tmpV = new THREE.Vector3();
 
-  const edgeFaces = new Map();
-  const edgePos   = new Map();
+  const edgeFaces = new Map();   // numeric edge key → [face, ...]
+  const edgePos   = new Map();   // numeric edge key → [[x,y,z], [x,y,z]]
+  // ids < posCount, so a*posCount+b is collision-free below ~94M vertices
+  // (same bound as exclusion.js numEdgeKey).
+  const EKM = posCount;
+  const ids = new Uint32Array(3);
+  const ptx = new Float64Array(3), pty = new Float64Array(3), ptz = new Float64Array(3);
 
   for (let t = 0; t < triCount; t++) {
-    const keys = [], pts = [];
     for (let v = 0; v < 3; v++) {
       tmpV.fromBufferAttribute(posAttr, t * 3 + v);
-      keys.push(pk(tmpV.x, tmpV.y, tmpV.z));
-      pts.push([tmpV.x, tmpV.y, tmpV.z]);
+      const id = weldMap.getOrSet(tmpV.x, tmpV.y, tmpV.z, nUnique);
+      if (weldMap.inserted) nUnique++;
+      ids[v] = id; ptx[v] = tmpV.x; pty[v] = tmpV.y; ptz[v] = tmpV.z;
     }
     for (let e = 0; e < 3; e++) {
-      const edgeKey = ek(keys[e], keys[(e + 1) % 3]);
+      const e2 = (e + 1) % 3;
+      const a = ids[e], b = ids[e2];
+      const edgeKey = a < b ? a * EKM + b : b * EKM + a;
       const list = edgeFaces.get(edgeKey);
       if (list) list.push(t);
       else {
         edgeFaces.set(edgeKey, [t]);
-        edgePos.set(edgeKey, [pts[e], pts[(e + 1) % 3]]);
+        edgePos.set(edgeKey, [[ptx[e], pty[e], ptz[e]], [ptx[e2], pty[e2], ptz[e2]]]);
       }
     }
   }
@@ -4068,13 +4098,12 @@ function addSmoothNormals(geometry) {
 
   // Vertex-dedup pass: assign a numeric ID to each unique quantised position.
   const QUANT = 1e4;
-  const dedupMap = new Map();
+  const dedupMap = new QuantizedPointMap(QUANT, Math.min(count, 1 << 22));
   let nextId = 0;
   const vertId = new Uint32Array(count);
   for (let i = 0; i < count; i++) {
-    const key = `${Math.round(pos[i*3]*QUANT)}_${Math.round(pos[i*3+1]*QUANT)}_${Math.round(pos[i*3+2]*QUANT)}`;
-    let id = dedupMap.get(key);
-    if (id === undefined) { id = nextId++; dedupMap.set(key, id); }
+    const id = dedupMap.getOrSet(pos[i*3], pos[i*3+1], pos[i*3+2], nextId);
+    if (dedupMap.inserted) nextId++;
     vertId[i] = id;
   }
 
@@ -4182,7 +4211,7 @@ function deactivatePrecisionMasking() {
     const sx = currentBounds.size.x.toFixed(2);
     const sy = currentBounds.size.y.toFixed(2);
     const sz = currentBounds.size.z.toFixed(2);
-    meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+    _setMeshInfo(triCount, mb, sx, sy, sz);
   } else if (precisionExcludedFaces.size > 0 && precisionParentMap) {
     // No precision geometry but have selections — map back to original
     excludedFaces = new Set();
@@ -4220,9 +4249,11 @@ async function refreshPrecisionMesh() {
   const brushDiameter = parseFloat(exclBrushRadiusSlider.value);
   const targetEdge = computePrecisionEdgeLength(brushDiameter);
 
-  // Estimate triangle count and warn if > 5M
+  // Estimate triangle count and warn if > 8M (threshold raised June 2026 —
+  // the typed-array subdivision is ~2× faster with far less GC churn, so the
+  // point where a confirm is warranted moved up accordingly)
   const estimated = estimateSubdivisionTriCount(currentGeometry, targetEdge);
-  if (estimated > 5_000_000) {
+  if (estimated > 8_000_000) {
     const estLabel = (estimated / 1_000_000).toFixed(1) + 'M';
     const msg = t('precision.warningBody', { n: estLabel });
     if (!confirm(msg)) return;
@@ -4297,7 +4328,7 @@ async function refreshPrecisionMesh() {
     const sx = currentBounds.size.x.toFixed(2);
     const sy = currentBounds.size.y.toFixed(2);
     const sz = currentBounds.size.z.toFixed(2);
-    meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+    _setMeshInfo(triCount, mb, sx, sy, sz);
 
     if (safetyCapHit) {
       triLimitWarning.classList.remove('hidden');
@@ -4532,6 +4563,43 @@ function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings) {
   return weights;
 }
 
+/**
+ * Map flat position/normal arrays from the in-app working space back to the
+ * model's original file pose: orig = poseRot⁻¹ · (mem − poseTrans). Undoes
+ * both the import centering and any in-app rotation, so exports align with
+ * the untouched source file (issue #82). Normals get the rotation only.
+ */
+function _restoreOriginalPose(positions, normals = null) {
+  const t = currentPoseTrans;
+  // Unit quaternion with |w| ≈ 1 is the identity rotation (either cover) —
+  // pure-translation fast path, and normals stay untouched.
+  if (Math.abs(currentPoseRot.w) > 1 - 1e-12) {
+    if (t.x === 0 && t.y === 0 && t.z === 0) return;
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i]     -= t.x;
+      positions[i + 1] -= t.y;
+      positions[i + 2] -= t.z;
+    }
+    return;
+  }
+  const rotInv = currentPoseRot.clone().invert();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < positions.length; i += 3) {
+    v.set(positions[i] - t.x, positions[i + 1] - t.y, positions[i + 2] - t.z).applyQuaternion(rotInv);
+    positions[i]     = v.x;
+    positions[i + 1] = v.y;
+    positions[i + 2] = v.z;
+  }
+  if (normals) {
+    for (let i = 0; i < normals.length; i += 3) {
+      v.set(normals[i], normals[i + 1], normals[i + 2]).applyQuaternion(rotInv);
+      normals[i]     = v.x;
+      normals[i + 1] = v.y;
+      normals[i + 2] = v.z;
+    }
+  }
+}
+
 async function handleExport(format = 'stl') {
   if (!currentGeometry || !activeMapEntry || isExporting || isBaking) return;
   const myToken = ++exportToken;
@@ -4544,8 +4612,6 @@ async function handleExport(format = 'stl') {
     deactivatePrecisionMasking();
   }
 
-  let subdivided      = null;
-  let displaced       = null;
   let finalGeometry   = null;
   let exportSucceeded = false;
 
@@ -4560,6 +4626,29 @@ async function handleExport(format = 'stl') {
       const exportEntry   = getEffectiveMapEntry();
       const bodyResults   = [];
       const perBodyBudget = settings.maxTriangles;
+
+      // Map pipeline stage events onto this body's slice of the progress bar.
+      const bodyEvent = (bi) => (stage, p, info) => {
+        const spans = { subdivide1: [0.00, 0.30], regularize: [0.30, 0.02], subdivide2: [0.32, 0.08],
+                        displace: [0.40, 0.35], decimate: [0.75, 0.17], repair: [0.92, 0.08] };
+        const [b, s] = spans[stage] || [0, 0];
+        let label;
+        switch (stage) {
+          case 'regularize': label = t('progress.regularizing'); break;
+          case 'displace':   label = t('progress.displacingVertices'); break;
+          case 'decimate':
+            label = (info && info.needsDecimation)
+              ? t('progress.decimatingTo', { from: (info.from || 0).toLocaleString(), to: perBodyBudget.toLocaleString() })
+              : t('progress.harvestingFlat');
+            break;
+          case 'repair':     label = t('progress.repairingMesh'); break;
+          default:           label = t('progress.subdividing');
+        }
+        setProgress(
+          0.02 + ((bi + b + s * (p || 0)) / bodies.length) * 0.93,
+          label + ` (${bi + 1}/${bodies.length})`
+        );
+      };
 
       for (let bi = 0; bi < bodies.length; bi++) {
         const body    = bodies[bi];
@@ -4576,7 +4665,7 @@ async function handleExport(format = 'stl') {
         await yieldFrame();
         if (exportToken !== myToken) return;
 
-        let bodySubdivided = null, bodyDisplaced = null, bodyFinal = null, bodyGeoForExport = null;
+        let bodyFinal = null;
         try {
           const alreadyBaked = !!body.wasPainted;
 
@@ -4657,28 +4746,30 @@ async function handleExport(format = 'stl') {
               slicedGeoForExport.attributes.position.needsUpdate = true;
               slicedGeoForExport.computeVertexNormals();
             }
-            let sliceSubdivided = null;
             try {
-              ({ geometry: sliceSubdivided } = await subdivide(
-                slicedGeoForExport, settings.refineLength, null, faceWeights
-              ));
-              bodyFinal = await runAsync(() =>
-                applyDisplacement(
-                  sliceSubdivided,
-                  exportEntry.imageData,
-                  exportEntry.width,
-                  exportEntry.height,
-                  settings,
-                  currentBounds,
-                  null
-                )
-              );
-              sliceSubdivided.dispose();
-              sliceSubdivided = null;
+              // Subdivide + displace the newly painted faces via the shared
+              // worker pipeline. The base mesh is already baked, so regularize,
+              // decimation, and the bottom snaps are all disabled here — the
+              // manual clamp/snap below covers this path like before.
+              const sliceResult = await runPipeline({
+                positions: slicedGeoForExport.attributes.position.array,
+                faceWeights,
+                imageData: exportEntry.imageData,
+                imgWidth: exportEntry.width,
+                imgHeight: exportEntry.height,
+                settings: { ...settings, regularizeEnabled: false, harvestFlatFaces: false,
+                            maxTriangles: Infinity, bottomAngleLimit: 0, smoothBottom: false },
+                bounds: currentBounds,
+                regularizeOpts: _regularizeOpts(),
+                mode: 'export',
+              }, bodyEvent(bi), () => exportToken !== myToken);
+              if (!sliceResult || exportToken !== myToken) return;
+              bodyFinal = new THREE.BufferGeometry();
+              bodyFinal.setAttribute('position', new THREE.BufferAttribute(sliceResult.positions, 3));
+              if (sliceResult.normals) bodyFinal.setAttribute('normal', new THREE.BufferAttribute(sliceResult.normals, 3));
             } finally {
               slicedGeo.dispose();
               if (slicedGeoForExport !== slicedGeo) slicedGeoForExport.dispose();
-              if (sliceSubdivided) sliceSubdivided.dispose();
             }
           } else {
             // Not baked — apply current texture.
@@ -4717,74 +4808,30 @@ async function handleExport(format = 'stl') {
               bodyGeoForExport.computeVertexNormals();
             }
 
-            let safetyCapHit;
-            ({ geometry: bodySubdivided, safetyCapHit } = await subdivide(
-              bodyGeoForExport,
-              settings.refineLength,
-              (p) => setProgress(
-                0.02 + (frac + p / bodies.length) * 0.40,
-                t('progress.subdividing') + ` (${bi + 1}/${bodies.length})`
-              ),
-              faceWeights
-            ));
-            if (exportToken !== myToken) return;
-
-            if (settings.regularizeEnabled && !body.wasRegularized && bodyExcludedLocal.size > 0) {
-              setProgress(0.02 + frac * 0.93, t('progress.regularizing'));
-              await yieldFrame();
-              const reg = regularizeMesh(
-                bodySubdivided,
-                new Int32Array(bodySubdivided.attributes.position.count / 3),
-                settings.refineLength,
-                _regularizeOpts()
-              );
-              bodySubdivided.dispose();
-              const exclAttr = reg.geometry.attributes.excludeWeight;
-              const { geometry: resub } = await subdivide(
-                reg.geometry,
-                settings.refineLength * settings.regularizeSecondPassMul,
-                null,
-                exclAttr ? exclAttr.array : null,
-                { fast: false }
-              );
-              reg.geometry.dispose();
-              bodySubdivided = resub;
-              if (exportToken !== myToken) return;
-            }
-			
-            bodyDisplaced = await runAsync(() =>
-              applyDisplacement(
-                bodySubdivided,
-                exportEntry.imageData,
-                exportEntry.width,
-                exportEntry.height,
-                settings,
-                currentBounds,
-                (p) => setProgress(
-                  0.02 + (frac + p / bodies.length) * 0.70,
-                  t('progress.displacingVertices') + ` (${bi + 1}/${bodies.length})`
-                )
-              )
-            );
-            if (exportToken !== myToken) return;
-
-            bodySubdivided.dispose(); bodySubdivided = null;
-
-            const dispTris = bodyDisplaced.attributes.position.count / 3;
-            if (dispTris > perBodyBudget) {
-              setProgress(
-                0.02 + frac * 0.93,
-                t('progress.decimatingTo', {
-                  from: dispTris.toLocaleString(),
-                  to:   perBodyBudget.toLocaleString(),
-                })
-              );
-              bodyFinal = await runAsync(() => decimate(bodyDisplaced, perBodyBudget, null));
-              bodyDisplaced.dispose(); bodyDisplaced = null;
-              if (exportToken !== myToken) return;
-            } else {
-              bodyFinal = bodyDisplaced; bodyDisplaced = null;
-            }
+            // Full pipeline for this body (subdivide → regularize → displace →
+            // decimate to the per-body budget → bottom snaps → T-junction
+            // repair), worker-first with inline fallback. Regularization is
+            // skipped only when this body was already regularized by a bake.
+            const bodyResult = await runPipeline({
+              positions: bodyGeoForExport.attributes.position.array,
+              faceWeights,
+              imageData: exportEntry.imageData,
+              imgWidth: exportEntry.width,
+              imgHeight: exportEntry.height,
+              settings: {
+                ...settings,
+                maxTriangles: perBodyBudget,
+                regularizeEnabled: settings.regularizeEnabled && !body.wasRegularized,
+              },
+              bounds: currentBounds,
+              regularizeOpts: _regularizeOpts(),
+              mode: 'export',
+            }, bodyEvent(bi), () => exportToken !== myToken);
+            if (bodyGeoForExport !== bodyGeo) bodyGeoForExport.dispose();
+            if (!bodyResult || exportToken !== myToken) return;
+            bodyFinal = new THREE.BufferGeometry();
+            bodyFinal.setAttribute('position', new THREE.BufferAttribute(bodyResult.positions, 3));
+            if (bodyResult.normals) bodyFinal.setAttribute('normal', new THREE.BufferAttribute(bodyResult.normals, 3));
           }
 
           // Flat-bottom clamp
@@ -4821,10 +4868,7 @@ async function handleExport(format = 'stl') {
           bodyFinal = null;
 
         } finally {
-          if (bodyGeoForExport && bodyGeoForExport !== bodyGeo) bodyGeoForExport.dispose();
-          if (bodySubdivided) bodySubdivided.dispose();
-          if (bodyDisplaced)  bodyDisplaced.dispose();
-          if (bodyFinal)      bodyFinal.dispose();
+          if (bodyFinal) bodyFinal.dispose();
         }
       }
 
@@ -4855,110 +4899,57 @@ async function handleExport(format = 'stl') {
       ? buildCombinedFaceWeights(currentGeometry, excludedFaces, selectionMode, settings)
       : null;
 
-    let safetyCapHit;
-    ({ geometry: subdivided, safetyCapHit } = await subdivide(
-      currentGeometry, settings.refineLength,
-      (p, triCount, longestEdge) => {
-        const label = triCount != null
-          ? t('progress.refining', { cur: triCount.toLocaleString(), edge: longestEdge.toFixed(2) })
-          : t('progress.subdividing');
-        setProgress(0.02 + p * 0.28, label);
-      },
-      faceWeights
-    ));
-    if (exportToken !== myToken) return;
-	if (settings.regularizeEnabled && !_geometryWasRegularized) {
-      setProgress(0.30, t('progress.regularizing'));
-      await yieldFrame();
-      const reg = regularizeMesh(subdivided, new Int32Array(subdivided.attributes.position.count / 3), settings.refineLength, _regularizeOpts());
-      subdivided.dispose();
-      const exclAttr = reg.geometry.attributes.excludeWeight;
-      const secondPassWeights = exclAttr ? exclAttr.array : null;
-      const { geometry: resub } = await subdivide(
-        reg.geometry, settings.refineLength * settings.regularizeSecondPassMul,
-        (p, triCount, longestEdge) => {
-          const label = triCount != null
-            ? t('progress.refining', { cur: triCount.toLocaleString(), edge: longestEdge.toFixed(2) })
-            : t('progress.subdividing');
-          setProgress(0.32 + p * 0.06, label);
-        },
-        secondPassWeights, { fast: false }
-      );
-      reg.geometry.dispose();
-      subdivided = resub;
-    }
-
-    const subTriCount = subdivided.attributes.position.count / 3;
-    setProgress(0.38, t('progress.applyingDisplacement', { n: subTriCount.toLocaleString() }));
-
+    // Run the heavy pipeline (subdivide → regularize → displace → decimate →
+    // bottom snaps → repair), preferably in the export worker so the UI stays
+    // responsive and background-tab throttling can't stall it. Falls back to
+    // running inline if the worker can't initialise. See exportPipeline.js.
     const exportEntry = getEffectiveMapEntry();
-    displaced = await runAsync(() =>
-      applyDisplacement(
-        subdivided,
-        exportEntry.imageData,
-        exportEntry.width,
-        exportEntry.height,
-        settings,
-        currentBounds,
-        (p) => setProgress(0.38 + p * 0.32, t('progress.displacingVertices'))
-      )
-    );
-    if (exportToken !== myToken) return;
+    const isStale = () => exportToken !== myToken;
+    const result = await runPipeline({
+      positions: currentGeometry.attributes.position.array,
+      faceWeights,
+      imageData: exportEntry.imageData,
+      imgWidth: exportEntry.width,
+      imgHeight: exportEntry.height,
+      settings: { ...settings, regularizeEnabled: settings.regularizeEnabled && !_geometryWasRegularized },
+      bounds: currentBounds,
+      regularizeOpts: _regularizeOpts(),
+      mode: 'export',
+    }, _onExportPipelineEvent, isStale);
+    if (!result || isStale()) return;
 
-    subdivided.dispose();
-
-    const dispTriCount = displaced.attributes.position.count / 3;
-    const needsDecimation = dispTriCount > settings.maxTriangles;
-    triLimitWarning.classList.toggle('hidden', !safetyCapHit);
+    triLimitWarning.classList.toggle('hidden', !result.safetyCapHit);
     triLimitWarning.textContent = t('warnings.safetyCapHit');
 
-    finalGeometry = displaced;
-    if (needsDecimation) {
-      setProgress(0.71, t('progress.decimatingTo', { from: dispTriCount.toLocaleString(), to: settings.maxTriangles.toLocaleString() }));
-      finalGeometry = await runAsync(() =>
-        decimate(
-          displaced,
-          settings.maxTriangles,
-          (p) => {
-            const cur = Math.round(dispTriCount - (dispTriCount - settings.maxTriangles) * p);
-            setProgress(
-              0.71 + p * 0.25,
-              t('progress.decimating', { cur: cur.toLocaleString(), to: settings.maxTriangles.toLocaleString() })
-            );
-          }
-        )
+    // Map the pipeline output back to the model's original position and
+    // orientation (issue #82) — in-app rotation is a texturing aid and is
+    // reverted here. The pipeline itself runs in the working space, so this
+    // must stay after runPipeline — and outside of it, keeping the
+    // bench-pipeline fingerprint valid. result arrays are fresh; mutating is safe.
+    // 3MF-loaded models are excluded: their original placement is restored by
+    // export3MF via the item transform + stored center offset, and restoring
+    // the pose here as well would double-apply the translation.
+    if (!get3mfCenterOffset()) _restoreOriginalPose(result.positions, result.normals);
+
+    finalGeometry = new THREE.BufferGeometry();
+    finalGeometry.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
+    if (result.normals) finalGeometry.setAttribute('normal', new THREE.BufferAttribute(result.normals, 3));
+
+    if (result.repairStats) {
+      const rs = result.repairStats;
+      // Ground-truth readout. The decisive number is `slivers`: zero-area
+      // "needle" triangles read as watertight here but every slicer (and our
+      // own importer) deletes them, punching a hole at each — that was the
+      // real cause of the open-edge warning on re-imported files. After
+      // repair both `slivers` and `open` must be 0.
+      console.log(
+        `%c[stlTexturizer] mesh repair (build 2026-06-10w): ` +
+        `removed ${rs.beforeSlivers.toLocaleString()} zero-area slivers; ` +
+        `final open=${rs.open}, non-manifold=${rs.nonManifold}, slivers=${rs.slivers} ` +
+        `(${rs.tris.toLocaleString()} tris)`,
+        'color:#0a0;font-weight:bold'
       );
-      displaced.dispose();
-      if (exportToken !== myToken) return;
     }
-
-    if (settings.bottomAngleLimit > 0) {
-      const bottomZ = currentBounds.min.z;
-      const pa = finalGeometry.attributes.position.array;
-      const na = finalGeometry.attributes.normal ? finalGeometry.attributes.normal.array : new Float32Array(pa.length);
-      for (let i = 0; i < pa.length; i += 9) {
-        let dirty = false;
-        if (pa[i+2]<bottomZ){pa[i+2]=bottomZ;dirty=true;}
-        if (pa[i+5]<bottomZ){pa[i+5]=bottomZ;dirty=true;}
-        if (pa[i+8]<bottomZ){pa[i+8]=bottomZ;dirty=true;}
-        if (dirty) {
-          const ux=pa[i+3]-pa[i],uy=pa[i+4]-pa[i+1],uz=pa[i+5]-pa[i+2];
-          const vx=pa[i+6]-pa[i],vy=pa[i+7]-pa[i+1],vz=pa[i+8]-pa[i+2];
-          const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
-          const len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
-          na[i]=na[i+3]=na[i+6]=nx/len;
-          na[i+1]=na[i+4]=na[i+7]=ny/len;
-          na[i+2]=na[i+5]=na[i+8]=nz/len;
-        }
-      }
-      finalGeometry.attributes.position.needsUpdate = true;
-      if (!finalGeometry.attributes.normal)
-        finalGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
-      else
-        finalGeometry.attributes.normal.needsUpdate = true;
-    }
-
-    if (settings.smoothBottom) snapBottomToFlat(finalGeometry, currentBounds.min.z, 0.1);
 
     const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
     const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
@@ -4988,14 +4979,173 @@ async function handleExport(format = 'stl') {
       alert(t('alerts.exportFailed', { msg: err.message }));
     }
   } finally {
-    if (subdivided) subdivided.dispose();
-    if (displaced && displaced !== subdivided) displaced.dispose();
-    if (finalGeometry && finalGeometry !== displaced && finalGeometry !== subdivided) finalGeometry.dispose();
+    // Intermediate geometries live inside the pipeline (worker or inline) and
+    // are disposed there; only the reconstructed output remains on this side.
+    if (finalGeometry) finalGeometry.dispose();
+    // Hide progress immediately on error or stale abort; success hides it after 1500 ms.
     if (!exportSucceeded) exportProgress.classList.add('hidden');
     isExporting = false;
     exportBtn.classList.remove('busy');
     export3mfBtn.classList.remove('busy');
   }
+}
+
+// ── Pipeline progress mapping (worker events → progress bar) ────────────────
+// Same fractions and labels as the old inline pipeline.
+
+function _onExportPipelineEvent(stage, p, info) {
+  switch (stage) {
+    case 'subdivide1': {
+      const label = info && info.triCount != null
+        ? t('progress.refining', { cur: info.triCount.toLocaleString(), edge: info.longestEdge.toFixed(2) })
+        : t('progress.subdividing');
+      setProgress(0.02 + p * 0.28, label);
+      break;
+    }
+    case 'regularize':
+      setProgress(0.30, t('progress.regularizing'));
+      break;
+    case 'subdivide2': {
+      const label = info && info.triCount != null
+        ? t('progress.refining', { cur: info.triCount.toLocaleString(), edge: info.longestEdge.toFixed(2) })
+        : t('progress.subdividing');
+      setProgress(0.32 + p * 0.06, label);
+      break;
+    }
+    case 'displace':
+      if (p === 0) setProgress(0.38, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
+      else setProgress(0.38 + p * 0.32, t('progress.displacingVertices'));
+      break;
+    case 'decimate':
+      if (info.needsDecimation) {
+        if (p === 0) {
+          setProgress(0.71, t('progress.decimatingTo', { from: info.from.toLocaleString(), to: settings.maxTriangles.toLocaleString() }));
+        } else {
+          const cur = Math.round(info.from - (info.from - settings.maxTriangles) * p);
+          setProgress(0.71 + p * 0.25, t('progress.decimating', { cur: cur.toLocaleString(), to: settings.maxTriangles.toLocaleString() }));
+        }
+      } else {
+        setProgress(0.71 + p * 0.25, t('progress.harvestingFlat'));
+      }
+      break;
+    case 'repair':
+      setProgress(0.96, t('progress.repairingMesh'));
+      break;
+  }
+}
+
+function _onBakePipelineEvent(stage, p, info) {
+  switch (stage) {
+    case 'subdivide1': {
+      const label = info && info.triCount != null
+        ? t('progress.refining', { cur: info.triCount.toLocaleString(), edge: info.longestEdge.toFixed(2) })
+        : t('progress.subdividing');
+      setBakeProgress(0.02 + p * 0.34, label);
+      break;
+    }
+    case 'regularize':
+      setBakeProgress(0.36, t('progress.regularizing'));
+      break;
+    case 'subdivide2': {
+      const label = info && info.triCount != null
+        ? t('progress.refining', { cur: info.triCount.toLocaleString(), edge: info.longestEdge.toFixed(2) })
+        : t('progress.subdividing');
+      setBakeProgress(0.38 + p * 0.09, label);
+      break;
+    }
+    case 'displace':
+      if (p === 0) setBakeProgress(0.47, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
+      else setBakeProgress(0.47 + p * 0.40, t('progress.displacingVertices'));
+      break;
+  }
+}
+
+// ── Export worker management ─────────────────────────────────────────────────
+// One persistent module worker runs the export/bake pipeline off the main
+// thread. If it can't initialise (very old browser, CDN unreachable from the
+// worker) the pipeline runs inline exactly as before — same module, same code.
+
+let _pipelineWorker = null;
+let _pipelineWorkerFailed = false; // hard init failure → stop retrying
+let _pipelineWorkerInit = null;    // in-flight init promise (warmup + export may race)
+
+// Resolve the cached worker, initialising it at most once. Returns null when
+// the worker can't run here (the caller then uses the inline pipeline).
+function ensurePipelineWorker() {
+  if (_pipelineWorkerFailed) return Promise.resolve(null);
+  if (_pipelineWorker) return Promise.resolve(_pipelineWorker);
+  if (!_pipelineWorkerInit) {
+    _pipelineWorkerInit = _initPipelineWorker().then(
+      (w) => { _pipelineWorker = w; _pipelineWorkerInit = null; return w; },
+      (err) => {
+        _pipelineWorkerFailed = true;
+        _pipelineWorkerInit = null;
+        console.warn('[stlTexturizer] export worker unavailable — running pipeline on the main thread:', err.message);
+        return null;
+      }
+    );
+  }
+  return _pipelineWorkerInit;
+}
+
+// Warm the worker up during idle time after load: the worker boot includes
+// fetching three.js (workers ignore the page import map), and doing that now
+// keeps it off the first export's critical path.
+{
+  const warm = () => { ensurePipelineWorker(); };
+  const schedule = () => {
+    if ('requestIdleCallback' in window) requestIdleCallback(warm, { timeout: 8000 });
+    else setTimeout(warm, 3000);
+  };
+  if (document.readyState === 'complete') schedule();
+  else window.addEventListener('load', schedule, { once: true });
+}
+
+function _initPipelineWorker() {
+  return new Promise((resolve, reject) => {
+    let w;
+    try {
+      w = new Worker(new URL('./exportWorker.js', import.meta.url), { type: 'module' });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const fail = (msg) => { try { w.terminate(); } catch {} reject(new Error(msg)); };
+    const timer = setTimeout(() => fail('worker init timeout'), 20000);
+    w.onmessage = (e) => {
+      if (e.data && e.data.type === 'ready') {
+        clearTimeout(timer);
+        w.onmessage = null;
+        w.onerror = null;
+        resolve(w);
+      }
+    };
+    w.onerror = (e) => { clearTimeout(timer); fail((e && e.message) || 'worker failed to load'); };
+  });
+}
+
+async function runPipeline(input, onEvent, isStale) {
+  // Prefer the worker. Fall back to inline ONLY on init failure — a pipeline
+  // error inside the worker (e.g. OOM) must propagate to the caller's alert,
+  // not silently re-run the same doomed job on the main thread.
+  const w = await ensurePipelineWorker();
+  if (isStale()) return null;
+  if (!w) {
+    return runExportPipeline(input, onEvent, isStale);
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { w.onmessage = null; w.onerror = null; };
+    const kill = () => { cleanup(); try { w.terminate(); } catch {} _pipelineWorker = null; };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (isStale()) { kill(); resolve(null); return; } // aborted → stop the worker's CPU burn
+      if (m.type === 'progress') onEvent(m.stage, m.p, m.info);
+      else if (m.type === 'done') { cleanup(); resolve(m.result); }
+      else if (m.type === 'error') { cleanup(); reject(new Error(m.message)); }
+    };
+    w.onerror = (e) => { kill(); reject(new Error((e && e.message) || 'export worker crashed')); };
+    w.postMessage({ cmd: 'run', input });
+  });
 }
 
 function setProgress(fraction, label) {
@@ -5007,50 +5157,8 @@ function setProgress(fraction, label) {
 
 // ── Smooth Bottom (advanced feature) ────────────────────────────────────────
 // Snaps every vertex within `tol` of the bottom plane onto it, so the bed-
-// contact surface comes out perfectly flat regardless of any tiny per-vertex
-// height drift introduced by sliver triangles, displacement noise, or
-// near-horizontal smooth normals tilting the bottom face during texturing.
-// Recomputes face normals on triangles whose vertices moved so slicers shade
-// the now-planar surface uniformly.
-//
-// Threshold default 0.1 mm is well above float-precision noise but below
-// any printer's resolution, so legitimate above-bottom geometry (side
-// fillets, the rest of the model) is left alone. Caller passes `bottomZ`
-// explicitly so this function works on any geometry / coordinate system.
-function snapBottomToFlat(geometry, bottomZ, tol = 0.1) {
-  const pa = geometry.attributes.position.array;
-  const na = geometry.attributes.normal
-    ? geometry.attributes.normal.array
-    : new Float32Array(pa.length);
-  let dirtyTris = 0;
-
-  for (let i = 0; i < pa.length; i += 9) {
-    let dirty = false;
-    if (Math.abs(pa[i+2] - bottomZ) <= tol) { pa[i+2] = bottomZ; dirty = true; }
-    if (Math.abs(pa[i+5] - bottomZ) <= tol) { pa[i+5] = bottomZ; dirty = true; }
-    if (Math.abs(pa[i+8] - bottomZ) <= tol) { pa[i+8] = bottomZ; dirty = true; }
-    if (dirty) {
-      dirtyTris++;
-      const ux = pa[i+3]-pa[i],   uy = pa[i+4]-pa[i+1], uz = pa[i+5]-pa[i+2];
-      const vx = pa[i+6]-pa[i],   vy = pa[i+7]-pa[i+1], vz = pa[i+8]-pa[i+2];
-      const nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
-      const len = Math.sqrt(nx*nx+ny*ny+nz*nz) || 1;
-      na[i]   = na[i+3] = na[i+6] = nx/len;
-      na[i+1] = na[i+4] = na[i+7] = ny/len;
-      na[i+2] = na[i+5] = na[i+8] = nz/len;
-    }
-  }
-
-  if (dirtyTris > 0) {
-    geometry.attributes.position.needsUpdate = true;
-    if (!geometry.attributes.normal) {
-      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
-    } else {
-      geometry.attributes.normal.needsUpdate = true;
-    }
-  }
-  return dirtyTris;
-}
+// contact surface comes out perfectly flat — implementation lives in
+// exportPipeline.js (snapBottomToFlat) so it runs inside the worker.
 
 function setBakeProgress(fraction, label) {
   const pct = Math.round(fraction * 100);
@@ -5079,7 +5187,6 @@ async function bakeTextures() {
 
   if (precisionMaskingEnabled) deactivatePrecisionMasking();
 
-  let subdivided = null;
   let displaced  = null;
   let succeeded  = false;
 
@@ -5092,96 +5199,39 @@ async function bakeTextures() {
       ? buildCombinedFaceWeights(currentGeometry, excludedFaces, selectionMode, settings)
       : null;
 
-    let faceParentId;
-    ({ geometry: subdivided, faceParentId } = await subdivide(
-      currentGeometry, settings.refineLength,
-      (p, triCount, longestEdge) => {
-        const label = triCount != null
-          ? t('progress.refining', { cur: triCount.toLocaleString(), edge: longestEdge.toFixed(2) })
-          : t('progress.subdividing');
-        setBakeProgress(0.02 + p * 0.34, label);
-      },
-      faceWeights
-    ));
-
-    if (settings.regularizeSecondPassMul < 1.0) {
-      setBakeProgress(0.36, t('progress.subdividing'));
-      await yieldFrame();
-      const ewAttr = subdivided.attributes.excludeWeight || null;
-      const secondPassWeights = ewAttr ? ewAttr.array : null;
-      const { geometry: resub, faceParentId: resubParents } = await subdivide(
-        subdivided,
-        settings.refineLength * settings.regularizeSecondPassMul,
-        (p, triCount, longestEdge) => {
-          const label = triCount != null
-            ? t('progress.refining', { cur: triCount.toLocaleString(), edge: longestEdge.toFixed(2) })
-            : t('progress.subdividing');
-          setBakeProgress(0.36 + p * 0.09, label);
-        },
-        secondPassWeights, { fast: false }
-      );
-      subdivided.dispose();
-      const composed = new Int32Array(resubParents.length);
-      for (let i = 0; i < resubParents.length; i++) {
-        composed[i] = faceParentId[resubParents[i]];
-      }
-      subdivided = resub;
-      faceParentId = composed;
-    }
-
-    const subTriCount = subdivided.attributes.position.count / 3;
-    setBakeProgress(0.47, t('progress.applyingDisplacement', { n: subTriCount.toLocaleString() }));
-
+    // Run the bake pipeline (subdivide → regularize → displace → bottom
+    // snaps; no decimation — it would drop the per-face parent mapping needed
+    // to remap user exclusions onto the baked output). Worker-first with
+    // inline fallback, same as handleExport.
     const exportEntry = getEffectiveMapEntry();
-    displaced = await runAsync(() =>
-      applyDisplacement(
-        subdivided,
-        exportEntry.imageData,
-        exportEntry.width,
-        exportEntry.height,
-        settings,
-        currentBounds,
-        (p) => setBakeProgress(0.47 + p * 0.40, t('progress.displacingVertices'))
-      )
-    );
+    const result = await runPipeline({
+      positions: currentGeometry.attributes.position.array,
+      faceWeights,
+      imageData: exportEntry.imageData,
+      imgWidth: exportEntry.width,
+      imgHeight: exportEntry.height,
+      settings,
+      bounds: currentBounds,
+      regularizeOpts: _regularizeOpts(),
+      mode: 'bake',
+    }, _onBakePipelineEvent, () => false);
+    if (!result) throw new Error('bake pipeline aborted');
 
-    subdivided.dispose();
-    subdivided = null;
+    const faceParentId = result.faceParentId;
+    displaced = new THREE.BufferGeometry();
+    displaced.setAttribute('position', new THREE.BufferAttribute(result.positions, 3));
+    if (result.normals) displaced.setAttribute('normal', new THREE.BufferAttribute(result.normals, 3));
 
-    if (settings.bottomAngleLimit > 0) {
-      const bottomZ = currentBounds.min.z;
-      const pa = displaced.attributes.position.array;
-      const na = displaced.attributes.normal ? displaced.attributes.normal.array : new Float32Array(pa.length);
-      for (let i = 0; i < pa.length; i += 9) {
-        let dirty = false;
-        if (pa[i+2]<bottomZ){pa[i+2]=bottomZ;dirty=true;}
-        if (pa[i+5]<bottomZ){pa[i+5]=bottomZ;dirty=true;}
-        if (pa[i+8]<bottomZ){pa[i+8]=bottomZ;dirty=true;}
-        if (dirty) {
-          const ux=pa[i+3]-pa[i],uy=pa[i+4]-pa[i+1],uz=pa[i+5]-pa[i+2];
-          const vx=pa[i+6]-pa[i],vy=pa[i+7]-pa[i+1],vz=pa[i+8]-pa[i+2];
-          const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
-          const len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
-          na[i]=na[i+3]=na[i+6]=nx/len;
-          na[i+1]=na[i+4]=na[i+7]=ny/len;
-          na[i+2]=na[i+5]=na[i+8]=nz/len;
-        }
-      }
-      displaced.attributes.position.needsUpdate = true;
-      if (!displaced.attributes.normal) displaced.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
-      else displaced.attributes.normal.needsUpdate = true;
-    }
-
-    if (settings.smoothBottom) snapBottomToFlat(displaced, currentBounds.min.z, 0.1);
-	displaced.computeBoundingBox();
-	
-	const bb = displaced.boundingBox;
-	const newBounds = {
-		min:    bb.min.clone(),
-		max:    bb.max.clone(),
-		size:   new THREE.Vector3().subVectors(bb.max, bb.min),
-		center: new THREE.Vector3().addVectors(bb.min, bb.max).multiplyScalar(0.5),
-	};
+    // Fresh bounds of the baked result — adoptBakedGeometry uses these as the
+    // new working bounds.
+    displaced.computeBoundingBox();
+    const bb = displaced.boundingBox;
+    const newBounds = {
+      min:    bb.min.clone(),
+      max:    bb.max.clone(),
+      size:   new THREE.Vector3().subVectors(bb.max, bb.min),
+      center: new THREE.Vector3().addVectors(bb.min, bb.max).multiplyScalar(0.5),
+    };
 
     setBakeProgress(0.90, t('progress.finalizing'));
     await yieldFrame();
@@ -5340,7 +5390,7 @@ async function bakeTextures() {
             ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
           });
         }
-        let bodySubdivided = null, bodyDisplaced = null, bodyGeoForBake = null;
+        let bodyDisplaced = null, bodyGeoForBake = null;
         try {
           // Clone and rotate body geometry into the same space as currentGeometry
           // so applyDisplacement UV mapping matches the viewport preview
@@ -5360,75 +5410,26 @@ async function bakeTextures() {
             bodyGeoForBake.computeVertexNormals();
           }
 
-          let bodyFaceParentId;
-          ({ geometry: bodySubdivided, faceParentId: bodyFaceParentId } = await subdivide(
-            bodyGeoForBake, settings.refineLength, null, bodyFaceWeights
-          ));
-          if (settings.regularizeEnabled) {
-            const reg = regularizeMesh(
-              bodySubdivided,
-              new Int32Array(bodySubdivided.attributes.position.count / 3),
-              settings.refineLength, _regularizeOpts()
-            );
-            bodySubdivided.dispose();
-            const exclAttr = reg.geometry.attributes.excludeWeight;
-            const { geometry: resub, faceParentId: resubParents } = await subdivide(
-              reg.geometry,
-              settings.refineLength * settings.regularizeSecondPassMul,
-              null, exclAttr ? exclAttr.array : null, { fast: false }
-            );
-            reg.geometry.dispose();
-            const composedBody = new Int32Array(resubParents.length);
-            for (let i = 0; i < resubParents.length; i++) {
-              composedBody[i] = reg.faceParentId[resubParents[i]];
-            }
-            bodySubdivided = resub;
-            bodyFaceParentId = composedBody;
-			body.wasRegularized = true;
-          }
-          bodyDisplaced = await runAsync(() =>
-            applyDisplacement(
-              bodySubdivided,
-              exportEntry_bake.imageData,
-              exportEntry_bake.width,
-              exportEntry_bake.height,
-              settings,
-              currentBounds,
-              null
-            )
-          );
-
-          bodySubdivided.dispose(); bodySubdivided = null;
-
-          if (settings.bottomAngleLimit > 0) {
-            const bottomZ = currentBounds.min.z;
-            const pa = bodyDisplaced.attributes.position.array;
-            const na = bodyDisplaced.attributes.normal
-              ? bodyDisplaced.attributes.normal.array
-              : new Float32Array(pa.length);
-            for (let i = 0; i < pa.length; i += 9) {
-              let dirty = false;
-              if (pa[i+2]<bottomZ){pa[i+2]=bottomZ;dirty=true;}
-              if (pa[i+5]<bottomZ){pa[i+5]=bottomZ;dirty=true;}
-              if (pa[i+8]<bottomZ){pa[i+8]=bottomZ;dirty=true;}
-              if (dirty) {
-                const ux=pa[i+3]-pa[i],uy=pa[i+4]-pa[i+1],uz=pa[i+5]-pa[i+2];
-                const vx=pa[i+6]-pa[i],vy=pa[i+7]-pa[i+1],vz=pa[i+8]-pa[i+2];
-                const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
-                const len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
-                na[i]=na[i+3]=na[i+6]=nx/len;
-                na[i+1]=na[i+4]=na[i+7]=ny/len;
-                na[i+2]=na[i+5]=na[i+8]=nz/len;
-              }
-            }
-            bodyDisplaced.attributes.position.needsUpdate = true;
-            if (!bodyDisplaced.attributes.normal)
-              bodyDisplaced.setAttribute('normal', new THREE.Float32BufferAttribute(na, 3));
-            else
-              bodyDisplaced.attributes.normal.needsUpdate = true;
-          }
-
-          if (settings.smoothBottom) snapBottomToFlat(bodyDisplaced, currentBounds.min.z, 0.1);
+          // Bake this body via the shared worker pipeline (subdivide →
+          // regularize → displace → bottom snaps; bake mode keeps the
+          // face-parent map and skips decimation).
+          const bodyBakeResult = await runPipeline({
+            positions: bodyGeoForBake.attributes.position.array,
+            faceWeights: bodyFaceWeights,
+            imageData: exportEntry_bake.imageData,
+            imgWidth: exportEntry_bake.width,
+            imgHeight: exportEntry_bake.height,
+            settings,
+            bounds: currentBounds,
+            regularizeOpts: _regularizeOpts(),
+            mode: 'bake',
+          }, () => {}, () => false);
+          if (!bodyBakeResult) throw new Error('bake pipeline aborted');
+          if (settings.regularizeEnabled) body.wasRegularized = true;
+          const bodyFaceParentId = bodyBakeResult.faceParentId;
+          bodyDisplaced = new THREE.BufferGeometry();
+          bodyDisplaced.setAttribute('position', new THREE.BufferAttribute(bodyBakeResult.positions, 3));
+          if (bodyBakeResult.normals) bodyDisplaced.setAttribute('normal', new THREE.BufferAttribute(bodyBakeResult.normals, 3));
 
           if (bakeMaskChk.checked && bodyFaceParentId) {
             const newBodyExcluded = new Set(bodyExcluded);
@@ -5459,7 +5460,6 @@ async function bakeTextures() {
           console.error(`Per-body bake failed for body ${bi} (${body.name}):`, bodyErr);
         } finally {
           if (bodyGeoForBake && bodyGeoForBake !== bodyGeo) bodyGeoForBake.dispose();
-          if (bodySubdivided) bodySubdivided.dispose();
           if (bodyDisplaced)  bodyDisplaced.dispose();
           if (window.gc) window.gc();
         }
@@ -5488,8 +5488,7 @@ async function bakeTextures() {
       alert(t('alerts.bakeFailed', { msg: err.message }));
     }
   } finally {
-    if (subdivided) subdivided.dispose();
-    if (displaced)  displaced.dispose();
+    if (displaced) displaced.dispose();
     if (!succeeded) bakeProgress.classList.add('hidden');
     isBaking = false;
     bakeBtn.classList.remove('busy');
@@ -5708,7 +5707,7 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   const sx = bounds.size.x.toFixed(2);
   const sy = bounds.size.y.toFixed(2);
   const sz = bounds.size.z.toFixed(2);
-  meshInfo.textContent = t('ui.meshInfo', { n: triCount.toLocaleString(), mb, sx, sy, sz });
+  _setMeshInfo(triCount, mb, sx, sy, sz);
 
   exportBtn.disabled = (activeMapEntry === null);
   export3mfBtn.disabled = (activeMapEntry === null);
@@ -5721,19 +5720,6 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   // Bake is a destructive transform — undo history references the pre-bake
   // triangle set, so it's no longer meaningful.
   _clearUndoStacks();
-}
-
-/**
- * Yield to the browser event loop, then run fn.
- * Uses setTimeout instead of rAF so it fires even in background tabs.
- */
-function runAsync(fn) {
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      try { resolve(fn()); }
-      catch (e) { reject(e); }
-    }, 0);
-  });
 }
 
 /** Yield to the browser event loop (for progress bar paints etc.). */
@@ -5758,7 +5744,7 @@ const PERSISTED_KEYS = [
   'mappingMode', 'scaleU', 'scaleV', 'lockScale',
   'offsetU', 'offsetV', 'rotation',
   'amplitude', 'textureHeight', 'invertDisplacement',
-  'symmetricDisplacement', 'noDownwardZ', 'smoothBottom', 'textureSmoothing',
+  'symmetricDisplacement', 'noDownwardZ', 'smoothBottom', 'harvestFlatFaces', 'harvestTol', 'textureSmoothing',
   'mappingBlend', 'seamBandWidth', 'capAngle', 'boundaryFalloff',
   'bottomAngleLimit', 'topAngleLimit',
   'refineLength', 'maxTriangles',
@@ -5856,6 +5842,14 @@ function applySettingsSnapshot(snap) {
   if (snap.smoothBottom != null) {
     smoothBottomChk.checked = snap.smoothBottom;
     smoothBottomChk.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (snap.harvestFlatFaces != null) {
+    harvestFlatChk.checked = snap.harvestFlatFaces;
+    harvestFlatChk.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (snap.harvestTol != null) {
+    harvestTolInput.value = snap.harvestTol;
+    harvestTolInput.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   // Cylindrical-mode state. cylinderCenterX/Y/radius pass through unchanged
@@ -6048,7 +6042,7 @@ const DEFAULT_SETTINGS_SNAPSHOT = Object.freeze({
   mappingMode: 5, scaleU: 0.5, scaleV: 0.5, lockScale: true,
   offsetU: 0, offsetV: 0, rotation: 0,
   amplitude: 0.5, textureHeight: 0.5, invertDisplacement: false,
-  symmetricDisplacement: false, noDownwardZ: false, smoothBottom: true, textureSmoothing: 0,
+  symmetricDisplacement: false, noDownwardZ: false, smoothBottom: true, harvestFlatFaces: true, harvestTol: 0.005, textureSmoothing: 0,
   mappingBlend: 1, seamBandWidth: 0.5, capAngle: 20, boundaryFalloff: 0,
   bottomAngleLimit: 5, topAngleLimit: 0,
   refineLength: 1, maxTriangles: 750000,
@@ -6122,6 +6116,10 @@ const exportModelChk    = document.getElementById('export-model-chk');
 const exportTextureChk  = document.getElementById('export-texture-chk');
 const exportTextureRow  = document.getElementById('export-texture-row');
 const importProjectInput = document.getElementById('import-project-input');
+const loadDialog        = document.getElementById('load-dialog');
+const loadModeAllRadio  = document.getElementById('load-mode-all');
+const loadModeSettingsRadio = document.getElementById('load-mode-settings');
+const loadGoBtn         = document.getElementById('load-go-btn');
 
 exportProjectBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -6154,31 +6152,43 @@ exportGoBtn.addEventListener('click', async () => {
     // Mark the custom map as the active reference so the importer restores it
     // even if the user has a preset selected at export time.
     if (includeTexture) payload.activeMapName = customSource.name;
+    // The bundled model is written in its ORIGINAL pose (issue #82), so the
+    // in-app rotation must ride along in the settings for the importer to
+    // replay — otherwise a saved session would lose its orientation.
+    if (includeModel && Math.abs(currentPoseRot.w) < 1 - 1e-12) {
+      payload.poseRotation = currentPoseRot.toArray();
+    }
     const zipFiles = { 'settings.json': strToU8(JSON.stringify(payload, null, 2)) };
 
-if (includeModel) {
-  const bodiesForSave = get3mfBodies();
-  if (bodiesForSave && bodiesForSave.length > 1) {
-    const modelResults = bodiesForSave.map(b => ({
-      geometry: b.wasPainted ? b.geometry : (b.origGeometry || b.geometry),
-      name: b.name,
-      matrix: b.matrix,
-    }));
-    zipFiles['model.3mf'] = _bodiesToRaw3MF(modelResults);
-    const bodyMask = {
-      selectionMode,
-      bodies: bodiesForSave.map(b => ({ 
-        wasPainted: b.wasPainted || false,
-        excludedFaces: b.excludedFaces ? [...b.excludedFaces] : null,
-      })),
-    };
-    zipFiles['bodymask.json'] = strToU8(JSON.stringify(bodyMask));
-  } else {
-    zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry);
-  }
-  const mask = _collectCurrentMask();
-  if (mask) zipFiles['mask.json'] = strToU8(JSON.stringify(mask));
-}
+    if (includeModel) {
+      const bodiesForSave = get3mfBodies();
+      if (bodiesForSave && bodiesForSave.length > 1) {
+        // Multi-body project: bundle the bodies as a raw 3MF plus the per-body
+        // paint/exclusion state so re-import restores the full working session.
+        const modelResults = bodiesForSave.map(b => ({
+          geometry: b.wasPainted ? b.geometry : (b.origGeometry || b.geometry),
+          name: b.name,
+          matrix: b.matrix,
+        }));
+        zipFiles['model.3mf'] = _bodiesToRaw3MF(modelResults);
+        const bodyMask = {
+          selectionMode,
+          bodies: bodiesForSave.map(b => ({
+            wasPainted: b.wasPainted || false,
+            excludedFaces: b.excludedFaces ? [...b.excludedFaces] : null,
+          })),
+        };
+        zipFiles['bodymask.json'] = strToU8(JSON.stringify(bodyMask));
+      } else {
+        // Written in the original pose (issue #82); re-importing re-centers and
+        // replays poseRotation, so project round-trips stay stable.
+        zipFiles['model.stl'] = _geometryToBinarySTL(currentGeometry, true);
+      }
+      // Mask indices reference the base geometry's triangles, so they only make
+      // sense when shipped alongside the model that produced them.
+      const mask = _collectCurrentMask();
+      if (mask) zipFiles['mask.json'] = strToU8(JSON.stringify(mask));
+    }
     if (includeTexture) {
       const blob = await new Promise(r => customSource.fullCanvas.toBlob(r, 'image/png'));
       zipFiles['texture.png'] = new Uint8Array(await blob.arrayBuffer());
@@ -6192,8 +6202,14 @@ if (includeModel) {
   }
 });
 
-/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). */
-function _geometryToBinarySTL(geo) {
+/** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). With restorePose, vertices/normals are mapped back to the model's original file pose (see _restoreOriginalPose) without mutating the geometry. */
+function _geometryToBinarySTL(geo, restorePose = false) {
+  const t = currentPoseTrans;
+  const rotInv = (restorePose && Math.abs(currentPoseRot.w) < 1 - 1e-12)
+    ? currentPoseRot.clone().invert()
+    : null;
+  const ox = restorePose ? t.x : 0, oy = restorePose ? t.y : 0, oz = restorePose ? t.z : 0;
+  const _v = new THREE.Vector3();
   const pos = geo.attributes.position.array;
   const nor = geo.attributes.normal ? geo.attributes.normal.array : null;
   const triCount = (pos.length / 9) | 0;
@@ -6208,15 +6224,19 @@ function _geometryToBinarySTL(geo) {
     const srcPos = i * 9;
     if (nor) {
       const srcNor = i * 9;
-      view.setFloat32(dst,     nor[srcNor],     true);
-      view.setFloat32(dst + 4, nor[srcNor + 1], true);
-      view.setFloat32(dst + 8, nor[srcNor + 2], true);
+      _v.set(nor[srcNor], nor[srcNor + 1], nor[srcNor + 2]);
+      if (rotInv) _v.applyQuaternion(rotInv);
+      view.setFloat32(dst,     _v.x, true);
+      view.setFloat32(dst + 4, _v.y, true);
+      view.setFloat32(dst + 8, _v.z, true);
     }
     for (let v = 0; v < 3; v++) {
       const d = dst + 12 + v * 12;
-      view.setFloat32(d,     pos[srcPos + v * 3],     true);
-      view.setFloat32(d + 4, pos[srcPos + v * 3 + 1], true);
-      view.setFloat32(d + 8, pos[srcPos + v * 3 + 2], true);
+      _v.set(pos[srcPos + v * 3] - ox, pos[srcPos + v * 3 + 1] - oy, pos[srcPos + v * 3 + 2] - oz);
+      if (rotInv) _v.applyQuaternion(rotInv);
+      view.setFloat32(d,     _v.x, true);
+      view.setFloat32(d + 4, _v.y, true);
+      view.setFloat32(d + 8, _v.z, true);
     }
   }
   return bytes;
@@ -6311,60 +6331,130 @@ async function importProject(file) {
   if (file.size > PROJECT_MAX_IMPORT) {
     throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB, max 500 MB)`);
   }
-  _undoApplyDepth++;
-  try {
   const buf = await file.arrayBuffer();
-  const unzipped = unzipSync(new Uint8Array(buf));
+  const bytes = new Uint8Array(buf);
+
+  // A .bumpmesh project is a ZIP (PK\x03\x04). If the user picked a bare model
+  // file here instead — common on macOS Chrome, where the accept=".bumpmesh"
+  // filter doesn't reliably hide .stl/.obj files — route it to the model loader
+  // rather than failing with a cryptic "invalid zip data". A 3MF is also a ZIP,
+  // so trust the extension first and fall back to the magic-byte sniff for
+  // extension-less STLs.
+  const isModelExt = /\.(stl|obj|3mf)$/i.test(file.name);
+  const isZip = bytes[0] === 0x50 && bytes[1] === 0x4B &&
+                bytes[2] === 0x03 && bytes[3] === 0x04;
+  if (isModelExt || !isZip) {
+    await handleModelFile(file);
+    return;
+  }
+
+  const unzipped = unzipSync(bytes);
 
   const settingsBytes = unzipped['settings.json'];
   const data = settingsBytes ? JSON.parse(strFromU8(settingsBytes)) : null;
-
-  // 1) Load model first — handleModelFile resets scaleU/scaleV/offsets/refineLength
-  //    AND clears any existing paint mask, so applied settings + restored mask
-  //    below will correctly override those resets.
   const hasModel3mf = !!unzipped['model.3mf'];
-  const hasModelStl = !!unzipped['model.stl'];
-  const hasModel = hasModel3mf || hasModelStl;
-  if (hasModel3mf) {
-    const f = new File([unzipped['model.3mf']], 'model.3mf', { type: 'application/octet-stream' });
-    await handleModelFile(f);
-  } else if (hasModelStl) {
-    const f = new File([unzipped['model.stl']], 'model.stl', { type: 'application/octet-stream' });
-    await handleModelFile(f);
-  }
-  if (hasModel3mf && unzipped['bodymask.json']) {
-    try {
-      const bodyMask = JSON.parse(strFromU8(unzipped['bodymask.json']));
-      const loadedBodies = get3mfBodies();
-      if (loadedBodies && bodyMask) {
-        // Restore selection mode
-        if (bodyMask.selectionMode === true) setSelectionMode(true);
-        else if (bodyMask.selectionMode === false) setSelectionMode(false);
-        // Restore per-body paint state
-        const bodies = bodyMask.bodies || [];
-        bodies.forEach((bm, i) => {
-          if (loadedBodies[i]) {
-            loadedBodies[i].wasPainted = bm.wasPainted || false;
-            if (bm.excludedFaces) {
-              loadedBodies[i].excludedFaces = new Set(bm.excludedFaces);
-            }
-          }
-        });
-      }
-    } catch (err) { console.warn('Could not restore body mask:', err); }
-  }
-  // 2) Apply settings after any model reset.
-  if (data) applySettingsSnapshot(data);
+  const hasModel = hasModel3mf || !!unzipped['model.stl'];
 
-  // 2b) Restore paint mask — only meaningful when the project shipped a model,
-  //     since indices reference that exact triangle set.
-  if (hasModel && unzipped['mask.json']) {
-    try {
-      const mask = JSON.parse(strFromU8(unzipped['mask.json']));
-      _restoreMask(mask);
-    } catch (err) { console.warn('Could not restore paint mask:', err); }
+  // Decide what to load. When the file carries a model the user chooses whether
+  // to replace their current model ('all') or keep it and apply settings only
+  // ('settings'). A file without a model is always settings-only — nothing to
+  // ask. The prompt runs BEFORE we touch any state, so dismissing it is a no-op.
+  let loadMode = 'settings';
+  if (hasModel) {
+    const choice = await promptLoadMode();
+    if (choice === null) return; // dialog dismissed → load nothing
+    loadMode = choice;
   }
-  // 3) Texture: custom PNG wins over named preset.
+
+  // Flush any pending settings change so it lands as its own undo step, keeping
+  // the pre-load baseline accurate for the settings-only commit below.
+  _flushUndoCapture();
+
+  _undoApplyDepth++;
+  try {
+    if (loadMode === 'all') {
+      // Load model first — handleModelFile resets scaleU/scaleV/offsets/refineLength
+      // AND clears any existing paint mask, so applied settings + restored mask
+      // below will correctly override those resets.
+      if (hasModel3mf) {
+        // Multi-body project: reload the bundled 3MF, then restore the
+        // per-body paint/exclusion state saved alongside it.
+        const f = new File([unzipped['model.3mf']], 'model.3mf', { type: 'application/octet-stream' });
+        await handleModelFile(f);
+        if (unzipped['bodymask.json']) {
+          try {
+            const bodyMask = JSON.parse(strFromU8(unzipped['bodymask.json']));
+            const loadedBodies = get3mfBodies();
+            if (loadedBodies && bodyMask) {
+              if (bodyMask.selectionMode === true) setSelectionMode(true);
+              else if (bodyMask.selectionMode === false) setSelectionMode(false);
+              (bodyMask.bodies || []).forEach((bm, i) => {
+                if (loadedBodies[i]) {
+                  loadedBodies[i].wasPainted = bm.wasPainted || false;
+                  if (bm.excludedFaces) {
+                    loadedBodies[i].excludedFaces = new Set(bm.excludedFaces);
+                  }
+                }
+              });
+            }
+          } catch (err) { console.warn('Could not restore body mask:', err); }
+        }
+      } else {
+        const stlFile = new File([unzipped['model.stl']], 'model.stl', { type: 'application/octet-stream' });
+        await handleModelFile(stlFile);
+      }
+
+      // The bundled model is stored in its original pose; replay the saved
+      // in-app rotation so the session resumes exactly as it was exported.
+      // Runs before applySettingsSnapshot so the finalize's cylinder-axis
+      // reset is overridden by the saved settings, not the other way around.
+      if (data && Array.isArray(data.poseRotation) && data.poseRotation.length === 4) {
+        const q = new THREE.Quaternion().fromArray(data.poseRotation).normalize();
+        if (Math.abs(q.w) < 1 - 1e-12) {
+          _rotateGeometry(q);
+          _rotateFinalize();
+        }
+      }
+
+      // Apply settings after the model reset.
+      if (data) applySettingsSnapshot(data);
+
+      // Restore paint mask — only meaningful here, since its indices reference
+      // the model we just loaded.
+      if (unzipped['mask.json']) {
+        try {
+          const mask = JSON.parse(strFromU8(unzipped['mask.json']));
+          _restoreMask(mask);
+        } catch (err) { console.warn('Could not restore paint mask:', err); }
+      }
+    } else {
+      // Settings only: keep the current model and its mask untouched. We skip
+      // model.stl (and never call handleModelFile, so the scale/offset/refine
+      // resets don't fire) and mask.json (its indices belong to the saved
+      // model, not the live one).
+      if (data) applySettingsSnapshot(data);
+    }
+
+    await _applyImportedTexture(unzipped, data);
+
+    _autoSaveSettings();
+  } finally {
+    _undoApplyDepth--;
+    if (loadMode === 'all') {
+      // Full import = fresh start; mask indices belong to the imported model.
+      _clearUndoStacks();
+    } else {
+      // Settings-only is an undoable settings change on the unchanged model.
+      _commitUndoCapture();
+    }
+  }
+}
+
+/**
+ * Apply a project's texture: custom PNG wins over a named preset. Shared by
+ * both load modes — the displacement map is part of the saved settings.
+ */
+async function _applyImportedTexture(unzipped, data) {
   if (unzipped['texture.png']) {
     const texName = (data && data.activeMapName) || 'imported-texture.png';
     const texFile = new File([unzipped['texture.png']], texName, { type: 'image/png' });
@@ -6380,13 +6470,43 @@ async function importProject(file) {
   } else if (data && data.activeMapName) {
     _selectPresetByName(data.activeMapName);
   }
+}
 
-  _autoSaveSettings();
-  } finally {
-    _undoApplyDepth--;
-    // Imported project = fresh start; mask indices belong to the imported model.
-    _clearUndoStacks();
-  }
+/**
+ * Show the load-mode dialog and resolve to 'all' (model + settings),
+ * 'settings' (settings only), or null if the user dismisses it. Defaults to
+ * 'settings' when a model is already loaded (protect what you're working on),
+ * otherwise 'all' (you need the file's model to see anything).
+ */
+function promptLoadMode() {
+  return new Promise((resolve) => {
+    const keepCurrent = !!currentGeometry;
+    loadModeSettingsRadio.checked = keepCurrent;
+    loadModeAllRadio.checked = !keepCurrent;
+    loadDialog.classList.remove('hidden');
+
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      loadDialog.classList.add('hidden');
+      loadGoBtn.removeEventListener('click', onGo);
+      document.removeEventListener('click', onOutside, true);
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    };
+    const onGo = () => finish(loadModeSettingsRadio.checked ? 'settings' : 'all');
+    const onOutside = (e) => { if (!loadDialog.contains(e.target)) finish(null); };
+    const onKey = (e) => { if (e.key === 'Escape') finish(null); };
+
+    loadGoBtn.addEventListener('click', onGo);
+    // Defer the dismiss listeners so the click/change that opened the picker
+    // doesn't immediately close the dialog.
+    setTimeout(() => {
+      document.addEventListener('click', onOutside, true);
+      document.addEventListener('keydown', onKey, true);
+    }, 0);
+  });
 }
 
 // ── Undo / Redo ──────────────────────────────────────────────────────────────

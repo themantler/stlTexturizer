@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { zipSync, strToU8 } from 'fflate';
+import { QuantizedPointMap } from './meshIndex.js';
 
 async function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
   if (window.electronAPI) {
@@ -122,72 +123,40 @@ function emitObjectXml(emitter, geometry, objectId, name, colorGroupId=null, col
   const triCount = (posArr.length / 9) | 0;
   if (triCount === 0) return;
 
-  const vertCount_max = triCount * 3;
-  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
-  const hashTable  = new Int32Array(HASH_SIZE).fill(-1);
-  const hashNext   = new Int32Array(vertCount_max).fill(-1);
-  const hashX      = new Float32Array(vertCount_max);
-  const hashY      = new Float32Array(vertCount_max);
-  const hashZ      = new Float32Array(vertCount_max);
-  const hashIdx    = new Int32Array(vertCount_max);
-  let   slotCount  = 0;
-  let   vertCount  = 0;
-  const QUANT_LOCAL = 1e4;
-  const triIdx = new Uint32Array(triCount * 3);
+  // ── Deduplicate vertices ─────────────────────────────────────────────────
+  // Weld on the 1e4 grid (0.0001 mm cells), matching the 4-decimal precision
+  // the coordinates are written with below — safely below the resolution of
+  // any FDM/SLA printer and far tighter than float32 rounding noise from the
+  // displacement pipeline. The pipeline snaps coordinates onto this exact
+  // grid in resolveTJunctions before export, so welding here only merges
+  // bit-identical (or grid-identical) points.
+  const indexMap  = new QuantizedPointMap(1e4, Math.min(triCount * 3, 1 << 22));
+  const uniqueXYZ = [];   // flat [x,y,z,x,y,z,...]
+  const triIdx    = new Uint32Array(triCount * 3);
 
   for (let i = 0; i < triCount; i++) {
     for (let j = 0; j < 3; j++) {
       const b = i * 9 + j * 3;
-      const x = posArr[b], y = posArr[b+1], z = posArr[b+2];
+      const x = posArr[b];
+      const y = posArr[b + 1];
+      const z = posArr[b + 2];
       if (!isFinite(x) || !isFinite(y) || !isFinite(z))
         throw new Error(`Non-finite vertex in body ${objectId} tri ${i} vert ${j}: (${x},${y},${z})`);
-      const qx = Math.round(x * QUANT_LOCAL);
-      const qy = Math.round(y * QUANT_LOCAL);
-      const qz = Math.round(z * QUANT_LOCAL);
-      const h  = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
-      let found = -1;
-      let probe = hashTable[h];
-      while (probe !== -1) {
-        if (Math.round(hashX[probe] * QUANT_LOCAL) === qx &&
-            Math.round(hashY[probe] * QUANT_LOCAL) === qy &&
-            Math.round(hashZ[probe] * QUANT_LOCAL) === qz) {
-          found = probe; break;
-        }
-        probe = hashNext[probe];
-      }
-      if (found === -1) {
-        hashX[slotCount]    = x;
-        hashY[slotCount]    = y;
-        hashZ[slotCount]    = z;
-        hashIdx[slotCount]  = vertCount;
-        hashNext[slotCount] = hashTable[h];
-        hashTable[h]        = slotCount;
-        triIdx[i * 3 + j]   = vertCount;
-        slotCount++;
-        vertCount++;
-      } else {
-        triIdx[i * 3 + j] = hashIdx[found];
-      }
+      const idx = indexMap.getOrSet(x, y, z, uniqueXYZ.length / 3);
+      if (indexMap.inserted) uniqueXYZ.push(x, y, z);
+      triIdx[i * 3 + j] = idx;
     }
   }
 
-  const vx = new Float32Array(vertCount);
-  const vy = new Float32Array(vertCount);
-  const vz = new Float32Array(vertCount);
-  for (let s = 0; s < slotCount; s++) {
-    const idx = hashIdx[s];
-    vx[idx] = hashX[s];
-    vy[idx] = hashY[s];
-    vz[idx] = hashZ[s];
-  }
-
+  const vertCount = uniqueXYZ.length / 3;
   const namePart = name ? ` name="${escapeXml(name)}"` : '';
   const colorPart = (colorGroupId !== null && colorIndex !== null)
     ? ` pid="${colorGroupId}" pindex="${colorIndex}"`
     : '';
   emit(`<object id="${objectId}"${namePart}${colorPart} type="model">\n<mesh>\n<vertices>\n`);
   for (let i = 0; i < vertCount; i++) {
-    emit('<vertex x="' + fmt4(vx[i]) + '" y="' + fmt4(vy[i]) + '" z="' + fmt4(vz[i]) + '"/>\n');
+    const b = i * 3;
+    emit('<vertex x="' + fmt4(uniqueXYZ[b]) + '" y="' + fmt4(uniqueXYZ[b+1]) + '" z="' + fmt4(uniqueXYZ[b+2]) + '"/>\n');
   }
   emit('</vertices>\n<triangles>\n');
   for (let i = 0; i < triCount; i++) {

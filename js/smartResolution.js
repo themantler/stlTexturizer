@@ -3,8 +3,9 @@
  *
  *   (a) is fine enough to resolve the active texture's detail at its
  *       current world-space scale, and
- *   (b) keeps the estimated post-subdivision triangle count below the
- *       hard 20M cap and a multiple of the user's `maxTriangles` budget.
+ *   (b) keeps the estimated post-subdivision triangle count within a
+ *       conservative, device-independent slice of the subdivision safety
+ *       cap (see HARD_CAP_TRIANGLES / HARD_CAP_HEADROOM below).
  *
  * The legacy default (bbox-diagonal / 250) ignores both texture frequency
  * and texture period, so it over-meshes smooth textures and under-meshes
@@ -20,16 +21,26 @@ import {
   MODE_TRIPLANAR, MODE_CUBIC,
 } from './mapping.js';
 
-// Mirror of subdivision.js's SAFETY_CAP — kept as a separate constant so
-// the smart resolver doesn't import the subdivider for one number.  Update
-// both together if you change the OOM guard.
+// Conservative BASE of subdivision.js's SAFETY_CAP (which is adaptive since
+// June 2026: 32M on Chrome/Edge machines reporting deviceMemory ≥ 8, 16M
+// elsewhere).  Smart deliberately budgets against the 16M base on every
+// machine so its recommended edge is device-independent — the same project
+// must produce the same suggestion everywhere.
 const HARD_CAP_TRIANGLES = 16_000_000;
 // Smart targets a conservative slice of the OOM guard so the suggestion
 // stays well clear of pipeline peak memory (displacement copies, decimation
 // working set, optional regularize+re-subdivide pass).  Users dragging the
 // resolution slider manually can still push subdivision up to the full
-// HARD_CAP_TRIANGLES.
-const HARD_CAP_HEADROOM  = 0.5;
+// safety cap.
+//
+// 0.75 → a 12M-triangle budget (~1.7 GB measured pipeline peak at ~145 B/tri
+// after the June 2026 typed-array rewrites).  The previous 0.5 (8M) was sized
+// for the old pipeline, where the same budget cost ~5 GB — so 12M today is
+// still far safer than 8M ever was, while letting fine textures on large
+// models get a meaningfully finer suggested edge.  Kept below 1.0 so a Smart
+// suggestion can never trip the 16M floor cap's "coarser than requested"
+// warning on browsers without the adaptive 32M cap.
+const HARD_CAP_HEADROOM  = 0.75;
 // Subdivision budget is the OOM guard only (16M).  We deliberately do NOT
 // scale by `settings.maxTriangles` here — that would make Smart's recommended
 // edge depend on the slider position, so two clicks of Smart could produce
@@ -316,6 +327,16 @@ export function computeSmartResolution({ geometry, bounds, settings, texture }) 
     const correction = Math.sqrt(simCount / triBudget);
     if (correction < 1.005) break;          // converged
     budgetEdge = budgetEdge * correction;
+  }
+  // Guarantee the budget actually holds.  On near-uniform meshes (cube-like
+  // CAD tessellations) the simulated count is a step function of the edge —
+  // 12 × 4^k for the default cube — so the sqrt-ratio corrections above can
+  // stall between split thresholds and finish a few percent over budget.
+  // Walk coarser in 5% steps until the simulation fits; sim count is
+  // monotonically non-increasing in edge length, so this always terminates.
+  for (let step = 0; step < 24; step++) {
+    if (simulateFromEdges(triEdges, budgetEdge) <= triBudget) break;
+    budgetEdge *= 1.05;
   }
 
   // 5. Final edge: take the larger (coarser) of detail vs budget so neither
