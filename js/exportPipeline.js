@@ -190,6 +190,9 @@ export function snapBottomToFlat(geometry, bottomZ, tol = 0.1) {
 export async function runExportPipeline(input, onEvent = () => {}, shouldAbort = () => false) {
   const { settings, regularizeOpts } = input;
   const mode = input.mode === 'bake' ? 'bake' : 'export';
+  // Host-provided subdivision cap (Electron build with known RAM budget);
+  // setting the global here makes it effective in both worker and inline runs.
+  if (settings.safetyCap > 0) globalThis.__BUMPMESH_SAFETY_CAP = settings.safetyCap;
   const bounds = reviveBounds(input.bounds);
 
   const geometry = new THREE.BufferGeometry();

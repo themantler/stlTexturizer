@@ -133,6 +133,24 @@ const settings = {
   regularizeSecondPassMul:   1.1,
 };
 
+// ── Electron memory-budget relaxation ────────────────────────────────────────
+// The browser caps navigator.deviceMemory at 8 no matter how much RAM the
+// machine has, so under Electron the preload reports the real total and we
+// raise the memory-gated limits accordingly. ~145 bytes/subdivided triangle
+// (measured June 2026): 64M ≈ 9 GB, 128M ≈ 19 GB peak — comfortable on
+// 32/64+ GB machines. settings.safetyCap rides into the export worker via
+// the pipeline input; the globals cover main-thread subdivides and 3MF import.
+{
+  const memGB = (window.electronAPI && window.electronAPI.totalMemoryGB) || 0;
+  if (memGB >= 16) {
+    const cap = memGB >= 64 ? 128_000_000 : memGB >= 32 ? 64_000_000 : 32_000_000;
+    settings.safetyCap = cap;
+    globalThis.__BUMPMESH_SAFETY_CAP  = cap;
+    globalThis.__BUMPMESH_MAX_3MF_TRIS = cap;
+    console.log(`[stlTexturizer] Electron: ${memGB} GB RAM — subdivision cap raised to ${cap.toLocaleString()} triangles`);
+  }
+}
+
 const presetNameInput  = document.getElementById('preset-name-input');
 const presetSelect     = document.getElementById('preset-select');
 const presetSaveBtn    = document.getElementById('preset-save-btn');

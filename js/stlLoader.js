@@ -326,8 +326,9 @@ function parse3MF(data) {
 
   let totalTris=0;
   for (const inst of instances) { const m=objectMap.get(inst.meshKey); if(m) totalTris+=m.triangles.length/3; }
-  if (totalTris>MAX_3MF_TRIANGLES)
-    throw new Error(`3MF contains ${totalTris.toLocaleString()} triangles, exceeding the ${MAX_3MF_TRIANGLES.toLocaleString()} limit`);
+  const max3mfTris = globalThis.__BUMPMESH_MAX_3MF_TRIS || MAX_3MF_TRIANGLES;
+  if (totalTris>max3mfTris)
+    throw new Error(`3MF contains ${totalTris.toLocaleString()} triangles, exceeding the ${max3mfTris.toLocaleString()} limit`);
 
   const mergedPositions = new Float32Array(totalTris * 9);
 

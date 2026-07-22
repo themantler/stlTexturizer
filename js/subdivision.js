@@ -38,9 +38,13 @@ const QUANTISE   = 1e5;
 // the tab, so the worst case at 32M on a marginal machine is a retry at a
 // coarser setting.  The Smart recommender targets a conservative ~4M either
 // way; only manual resolution-slider drags approach these caps.
-const SAFETY_CAP = (typeof navigator !== 'undefined' && navigator.deviceMemory >= 8)
+const SAFETY_CAP_DEFAULT = (typeof navigator !== 'undefined' && navigator.deviceMemory >= 8)
   ? 32_000_000
   : 16_000_000;
+// Hosts that know the real memory budget (the Electron build — deviceMemory
+// never reports above 8) can raise the cap via this global; exportPipeline
+// sets it from settings.safetyCap so it reaches the worker context too.
+const SAFETY_CAP = () => globalThis.__BUMPMESH_SAFETY_CAP || SAFETY_CAP_DEFAULT;
 
 // ── Growable typed vertex store ──────────────────────────────────────────────
 // Shared by the indexers (which build it) and the subdivision passes (which
@@ -103,20 +107,20 @@ export async function subdivide(geometry, maxEdgeLength, onProgress, faceWeights
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const triCount = currentIndices.length / 3;
-    if (triCount >= SAFETY_CAP) {
+    if (triCount >= SAFETY_CAP()) {
       safetyCapHit = true;
       break;
     }
 
     const { newIndices, newFaceExcluded, newFaceParentId, changed, capped } = subdividePass(
-      verts, currentIndices, maxEdgeLength, SAFETY_CAP, currentFaceExcluded,
+      verts, currentIndices, maxEdgeLength, SAFETY_CAP(), currentFaceExcluded,
       posCanonMap, currentFaceParentId
     );
     currentIndices = newIndices;
     if (newFaceExcluded) currentFaceExcluded = newFaceExcluded;
     if (newFaceParentId) currentFaceParentId = newFaceParentId;
 
-    if (capped || newIndices.length / 3 >= SAFETY_CAP) safetyCapHit = true;
+    if (capped || newIndices.length / 3 >= SAFETY_CAP()) safetyCapHit = true;
 
     // Report POST-pass state — the longest edge now is what the pass left
     // behind, not what it just refined away.  This way the user sees the
