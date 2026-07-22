@@ -4651,14 +4651,23 @@ async function handleExport(format = 'stl') {
       if (exportToken !== myToken) return;
 
       const exportEntry   = getEffectiveMapEntry();
-      const bodyResults   = [];
+      const bodyResults   = new Array(bodies.length).fill(null); // indexed — keeps 3MF body order stable under concurrency
       const perBodyBudget = settings.maxTriangles;
 
-      // Map pipeline stage events onto this body's slice of the progress bar.
+      // Aggregate per-body pipeline progress into one bar. Each body tracks
+      // its own local [0..1] completion; the bar shows the mean across all
+      // bodies, so concurrent workers advance it smoothly instead of
+      // fighting over it.
+      const bodyLocal  = new Float64Array(bodies.length);
+      let bodiesDone   = 0;
       const bodyEvent = (bi) => (stage, p, info) => {
         const spans = { subdivide1: [0.00, 0.30], regularize: [0.30, 0.02], subdivide2: [0.32, 0.08],
                         displace: [0.40, 0.35], decimate: [0.75, 0.17], repair: [0.92, 0.08] };
         const [b, s] = spans[stage] || [0, 0];
+        const local = b + s * (p || 0);
+        if (local > bodyLocal[bi]) bodyLocal[bi] = local;
+        let sum = 0;
+        for (let i = 0; i < bodyLocal.length; i++) sum += bodyLocal[i];
         let label;
         switch (stage) {
           case 'regularize': label = t('progress.regularizing'); break;
@@ -4672,25 +4681,20 @@ async function handleExport(format = 'stl') {
           default:           label = t('progress.subdividing');
         }
         setProgress(
-          0.02 + ((bi + b + s * (p || 0)) / bodies.length) * 0.93,
-          label + ` (${bi + 1}/${bodies.length})`
+          0.02 + (sum / bodies.length) * 0.93,
+          label + ` (${bodiesDone}/${bodies.length})`
         );
       };
 
-      for (let bi = 0; bi < bodies.length; bi++) {
+      // Process one body start-to-finish. runOn(input, onEvent, isStale)
+      // executes the pipeline — on a dedicated pool worker when several are
+      // available, otherwise the shared runPipeline (worker-first, inline
+      // fallback).
+      const processBody = async (bi, runOn) => {
         const body    = bodies[bi];
         const bodyGeo = body.geometry;
 
-        if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) continue;
-
-        const frac = bi / bodies.length;
-
-        setProgress(
-          0.02 + frac * 0.93,
-          t('progress.subdividing') + ` (${bi + 1}/${bodies.length})`
-        );
-        await yieldFrame();
-        if (exportToken !== myToken) return;
+        if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) return;
 
         let bodyFinal = null;
         try {
@@ -4778,7 +4782,7 @@ async function handleExport(format = 'stl') {
               // worker pipeline. The base mesh is already baked, so regularize,
               // decimation, and the bottom snaps are all disabled here — the
               // manual clamp/snap below covers this path like before.
-              const sliceResult = await runPipeline({
+              const sliceResult = await runOn({
                 positions: slicedGeoForExport.attributes.position.array,
                 faceWeights,
                 imageData: exportEntry.imageData,
@@ -4837,9 +4841,9 @@ async function handleExport(format = 'stl') {
 
             // Full pipeline for this body (subdivide → regularize → displace →
             // decimate to the per-body budget → bottom snaps → T-junction
-            // repair), worker-first with inline fallback. Regularization is
-            // skipped only when this body was already regularized by a bake.
-            const bodyResult = await runPipeline({
+            // repair). Regularization is skipped only when this body was
+            // already regularized by a bake.
+            const bodyResult = await runOn({
               positions: bodyGeoForExport.attributes.position.array,
               faceWeights,
               imageData: exportEntry.imageData,
@@ -4891,23 +4895,62 @@ async function handleExport(format = 'stl') {
           }
 
           if (settings.smoothBottom) snapBottomToFlat(bodyFinal, currentBounds.min.z, 0.1);
-          bodyResults.push({ geometry: bodyFinal, name: body.name, matrix: body.matrix, color: body.color || null });
+          bodyResults[bi] = { geometry: bodyFinal, name: body.name, matrix: body.matrix, color: body.color || null };
           bodyFinal = null;
+          bodyLocal[bi] = 1;
+          bodiesDone++;
 
         } finally {
           if (bodyFinal) bodyFinal.dispose();
         }
+      };
+
+      // Worker pool: process bodies concurrently, one in-flight body per
+      // worker. Pool size scales with the machine — the RAM tiers match the
+      // subdivision-cap tiers (each in-flight body peaks at ~145 B/tri of its
+      // subdivided size), and hardwareConcurrency bounds it on many-body
+      // models. Anything below 2 workers (or a failed pool boot) falls back
+      // to the sequential shared-worker path.
+      const memGB = (window.electronAPI && window.electronAPI.totalMemoryGB) || 0;
+      const hw    = navigator.hardwareConcurrency || 4;
+      const poolTarget = Math.min(
+        bodies.length,
+        memGB >= 64 ? Math.min(8, hw) : memGB >= 32 ? Math.min(4, hw) : 2
+      );
+      let pool = [];
+      if (poolTarget > 1) pool = await _createPipelineWorkerPool(poolTarget);
+
+      try {
+        if (pool.length > 1) {
+          let nextBody = 0;
+          await Promise.all(pool.map(async (w) => {
+            for (;;) {
+              const bi = nextBody++;
+              if (bi >= bodies.length || exportToken !== myToken) return;
+              await processBody(bi, (input, ev, stale) => _runPipelineOnWorker(w, input, ev, stale));
+            }
+          }));
+        } else {
+          for (let bi = 0; bi < bodies.length; bi++) {
+            if (exportToken !== myToken) return;
+            await processBody(bi, runPipeline);
+          }
+        }
+      } finally {
+        for (const w of pool) { try { w.terminate(); } catch { /* already dead */ } }
       }
+      if (exportToken !== myToken) return;
 
       setProgress(0.97, t('progress.writing3mf'));
       await yieldFrame();
       if (exportToken !== myToken) return;
 
+      const orderedResults = bodyResults.filter(Boolean);
       const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
       const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
-      export3MF(bodyResults, `${currentStlName}_${texLabel}_amp${ampLabel}.3mf`);
+      export3MF(orderedResults, `${currentStlName}_${texLabel}_amp${ampLabel}.3mf`);
 
-      for (const r of bodyResults) r.geometry.dispose();
+      for (const r of orderedResults) r.geometry.dispose();
 
       exportSucceeded = true;
       setProgress(1.0, t('progress.done'));
@@ -5148,6 +5191,48 @@ function _initPipelineWorker() {
       }
     };
     w.onerror = (e) => { clearTimeout(timer); fail((e && e.message) || 'worker failed to load'); };
+  });
+}
+
+/**
+ * Boot up to n dedicated pipeline workers for a parallel multi-body export.
+ * Workers boot concurrently; failures are tolerated (whatever booted is
+ * returned, possibly an empty array — callers fall back to the sequential
+ * shared-worker path). Callers own the returned workers and must terminate
+ * them when done.
+ */
+async function _createPipelineWorkerPool(n) {
+  const settled = await Promise.allSettled(
+    Array.from({ length: n }, () => _initPipelineWorker())
+  );
+  const workers = [];
+  for (const s of settled) {
+    if (s.status === 'fulfilled') workers.push(s.value);
+  }
+  if (workers.length < n) {
+    console.warn(`[stlTexturizer] export worker pool: ${workers.length}/${n} workers booted`);
+  }
+  return workers;
+}
+
+/**
+ * Run one pipeline job on a specific (caller-owned) worker. Same protocol as
+ * runPipeline's worker branch, but scoped to the given worker so several jobs
+ * can run concurrently across a pool. On stale/crash the worker is terminated
+ * — the pool's finally-terminate tolerates that.
+ */
+function _runPipelineOnWorker(w, input, onEvent, isStale) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { w.onmessage = null; w.onerror = null; };
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (isStale()) { cleanup(); try { w.terminate(); } catch { /* already dead */ } resolve(null); return; }
+      if (m.type === 'progress') onEvent(m.stage, m.p, m.info);
+      else if (m.type === 'done') { cleanup(); resolve(m.result); }
+      else if (m.type === 'error') { cleanup(); reject(new Error(m.message)); }
+    };
+    w.onerror = (e) => { cleanup(); try { w.terminate(); } catch { /* already dead */ } reject(new Error((e && e.message) || 'export worker crashed')); };
+    w.postMessage({ cmd: 'run', input });
   });
 }
 
