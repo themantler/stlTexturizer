@@ -37,6 +37,7 @@ import { regularizeMesh } from './regularize.js';
 import { applyDisplacement } from './displacement.js';
 import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
+import { flipCoplanarToDelaunay } from './coplanarFlip.js';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
@@ -246,6 +247,18 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
       subdivided = resub;
     }
     if (shouldAbort()) return null;
+
+    // Coplanar Delaunay edge-flip: re-orient sliver triangles on flat textured
+    // faces so displacement no longer tears along the CAD tessellation's long
+    // edges. Runs on the flat (undisplaced) mesh — vertices are never moved, so
+    // geometry and watertightness are preserved. See coplanarFlip.js.
+    if (settings.flattenSlivers !== false) {
+      onEvent('flatten', 0);
+      await yieldFrame();
+      const flat = flipCoplanarToDelaunay(subdivided, { flatAngleDeg: settings.flattenAngleDeg ?? 1 });
+      if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
+      if (shouldAbort()) return null;
+    }
 
     const subTriCount = subdivided.attributes.position.count / 3;
     onEvent('displace', 0, { triCount: subTriCount });

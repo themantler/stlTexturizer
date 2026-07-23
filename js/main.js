@@ -138,6 +138,10 @@ const settings = {
   regularizeNormalDeg:       15,
   regularizeAggressiveNormalDeg: 25,
   regularizeSecondPassMul:   1.1,
+  // Coplanar Delaunay edge-flip on flat textured faces (fixes sliver-following
+  // tear lines). flattenAngleDeg = max dihedral treated as "flat".
+  flattenSlivers:            true,
+  flattenAngleDeg:           1,
 };
 
 // ── Electron memory-budget relaxation ────────────────────────────────────────
@@ -389,6 +393,9 @@ const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
 const harvestFlatChk         = document.getElementById('harvest-flat-chk');
 const harvestTolInput        = document.getElementById('harvest-tol');
 const harvestTolRow          = document.getElementById('harvest-tol-row');
+const flattenSliversChk      = document.getElementById('flatten-slivers-chk');
+const flattenAngleInput      = document.getElementById('flatten-angle');
+const flattenAngleRow        = document.getElementById('flatten-angle-row');
 // Regularize tuning inputs (Advanced panel) → settings keys consumed by
 // _regularizeOpts() and the second-pass re-subdivide multiplier.
 const _regTuningInputs = {
@@ -1621,6 +1628,23 @@ function wireEvents() {
     el.addEventListener('input', () => {
       const v = parseFloat(el.value);
       if (Number.isFinite(v) && v > 0) settings[key] = v;
+    });
+  }
+
+  // Coplanar sliver-flatten toggle + flat-angle threshold.
+  if (flattenSliversChk) {
+    flattenSliversChk.checked = settings.flattenSlivers;
+    if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !settings.flattenSlivers);
+    flattenSliversChk.addEventListener('change', () => {
+      settings.flattenSlivers = flattenSliversChk.checked;
+      if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !settings.flattenSlivers);
+    });
+  }
+  if (flattenAngleInput) {
+    flattenAngleInput.value = settings.flattenAngleDeg;
+    flattenAngleInput.addEventListener('input', () => {
+      const v = parseFloat(flattenAngleInput.value);
+      if (Number.isFinite(v) && v > 0) settings.flattenAngleDeg = v;
     });
   }
 
@@ -4695,8 +4719,8 @@ async function handleExport(format = 'stl') {
       const bodyLocal  = new Float64Array(bodies.length);
       let bodiesDone   = 0;
       const bodyEvent = (bi) => (stage, p, info) => {
-        const spans = { subdivide1: [0.00, 0.30], regularize: [0.30, 0.02], subdivide2: [0.32, 0.08],
-                        displace: [0.40, 0.35], decimate: [0.75, 0.17], repair: [0.92, 0.08] };
+        const spans = { subdivide1: [0.00, 0.30], regularize: [0.30, 0.02], subdivide2: [0.32, 0.06],
+                        flatten: [0.38, 0.02], displace: [0.40, 0.35], decimate: [0.75, 0.17], repair: [0.92, 0.08] };
         const [b, s] = spans[stage] || [0, 0];
         const local = b + s * (p || 0);
         if (local > bodyLocal[bi]) bodyLocal[bi] = local;
@@ -5132,9 +5156,12 @@ function _onExportPipelineEvent(stage, p, info) {
       setProgress(0.32 + p * 0.06, label);
       break;
     }
+    case 'flatten':
+      setProgress(0.38, t('progress.regularizing'));
+      break;
     case 'displace':
-      if (p === 0) setProgress(0.38, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
-      else setProgress(0.38 + p * 0.32, t('progress.displacingVertices'));
+      if (p === 0) setProgress(0.39, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
+      else setProgress(0.39 + p * 0.31, t('progress.displacingVertices'));
       break;
     case 'decimate':
       if (info.needsDecimation) {
@@ -5173,9 +5200,12 @@ function _onBakePipelineEvent(stage, p, info) {
       setBakeProgress(0.38 + p * 0.09, label);
       break;
     }
+    case 'flatten':
+      setBakeProgress(0.47, t('progress.regularizing'));
+      break;
     case 'displace':
-      if (p === 0) setBakeProgress(0.47, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
-      else setBakeProgress(0.47 + p * 0.40, t('progress.displacingVertices'));
+      if (p === 0) setBakeProgress(0.48, t('progress.applyingDisplacement', { n: info.triCount.toLocaleString() }));
+      else setBakeProgress(0.48 + p * 0.39, t('progress.displacingVertices'));
       break;
   }
 }
@@ -5929,6 +5959,7 @@ const PERSISTED_KEYS = [
   'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
+  'flattenSlivers', 'flattenAngleDeg',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -6010,6 +6041,15 @@ function applySettingsSnapshot(snap) {
     if (snap[key] == null) continue;
     settings[key] = snap[key];
     if (el) el.value = snap[key];
+  }
+  if (snap.flattenSlivers != null && flattenSliversChk) {
+    settings.flattenSlivers = snap.flattenSlivers;
+    flattenSliversChk.checked = snap.flattenSlivers;
+    if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !snap.flattenSlivers);
+  }
+  if (snap.flattenAngleDeg != null && flattenAngleInput) {
+    settings.flattenAngleDeg = snap.flattenAngleDeg;
+    flattenAngleInput.value = snap.flattenAngleDeg;
   }
 
   // Restore saved lock state without invoking the button's click handler
