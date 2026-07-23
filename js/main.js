@@ -141,20 +141,30 @@ const settings = {
 };
 
 // ── Electron memory-budget relaxation ────────────────────────────────────────
-// The browser caps navigator.deviceMemory at 8 no matter how much RAM the
-// machine has, so under Electron the preload reports the real total and we
-// raise the memory-gated limits accordingly. ~145 bytes/subdivided triangle
-// (measured June 2026): 64M ≈ 9 GB, 128M ≈ 19 GB peak — comfortable on
-// 32/64+ GB machines. settings.safetyCap rides into the export worker via
-// the pipeline input; the globals cover main-thread subdivides and 3MF import.
+// The browser caps navigator.deviceMemory at 8, so under Electron the preload
+// reports real RAM and we lift the subdivision cap from the conservative
+// browser default (16M) to 32M on any machine with ≥16 GB.
+//
+// Why not higher, even with 128 GB? The ceiling here is NOT total RAM — it is
+// V8's per-allocation limit. toNonIndexed() builds the subdivided mesh as
+// single contiguous Float32Arrays of triCount×9 floats (36 bytes/tri):
+//   32M → 1.15 GB/buffer   48M → 1.73 GB   64M → 2.30 GB   128M → 4.6 GB
+// A single ArrayBuffer above ~2 GB fails to allocate ("Array buffer allocation
+// failed" / "…maximum size…") no matter how much free RAM exists — which is
+// exactly the "OOM at 7 GB" seen at the old 128M cap. 32M keeps every buffer
+// well under the wall (displacement then clones pos+nrm, so peak ≈ 4–5 GB of
+// sub-2 GB buffers — fine on ≥16 GB). settings.safetyCap rides into the export
+// worker via the pipeline input; the globals cover main-thread subdivides and
+// 3MF import. Raising the cap needs chunked (non-contiguous) mesh buffers, not
+// more RAM.
 {
   const memGB = (window.electronAPI && window.electronAPI.totalMemoryGB) || 0;
   if (memGB >= 16) {
-    const cap = memGB >= 64 ? 128_000_000 : memGB >= 32 ? 64_000_000 : 32_000_000;
+    const cap = 32_000_000;
     settings.safetyCap = cap;
     globalThis.__BUMPMESH_SAFETY_CAP  = cap;
     globalThis.__BUMPMESH_MAX_3MF_TRIS = cap;
-    console.log(`[stlTexturizer] Electron: ${memGB} GB RAM — subdivision cap raised to ${cap.toLocaleString()} triangles`);
+    console.log(`[stlTexturizer] Electron: ${memGB} GB RAM — subdivision cap set to ${cap.toLocaleString()} triangles (per-buffer allocation ceiling, not RAM-bound)`);
   }
 }
 
@@ -379,6 +389,17 @@ const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
 const harvestFlatChk         = document.getElementById('harvest-flat-chk');
 const harvestTolInput        = document.getElementById('harvest-tol');
 const harvestTolRow          = document.getElementById('harvest-tol-row');
+// Regularize tuning inputs (Advanced panel) → settings keys consumed by
+// _regularizeOpts() and the second-pass re-subdivide multiplier.
+const _regTuningInputs = {
+  regularizeSecondPassMul:       document.getElementById('reg-second-pass-mul'),
+  regularizeAspectThreshold:     document.getElementById('reg-aspect-threshold'),
+  regularizeSlack:               document.getElementById('reg-slack'),
+  regularizeAggressiveSlack:     document.getElementById('reg-aggressive-slack'),
+  regularizeExtremeAspect:       document.getElementById('reg-extreme-aspect'),
+  regularizeNormalDeg:           document.getElementById('reg-normal-deg'),
+  regularizeAggressiveNormalDeg: document.getElementById('reg-aggressive-normal-deg'),
+};
 
 // ── Exclusion panel DOM refs ──────────────────────────────────────────────────
 const exclBrushBtn        = document.getElementById('excl-brush-btn');
@@ -1590,6 +1611,18 @@ function wireEvents() {
     if (Number.isFinite(v) && v >= 0) settings.harvestTol = v;
     // No preview rebuild needed — harvesting only affects the final decimation.
   });
+
+  // Regularize tuning: init each input from settings, write back on edit.
+  // Read at run time by _regularizeOpts()/the pipeline, so changes apply on the
+  // next bake/export of a freshly loaded model (regularize runs once per body).
+  for (const [key, el] of Object.entries(_regTuningInputs)) {
+    if (!el) continue;
+    el.value = settings[key];
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      if (Number.isFinite(v) && v > 0) settings[key] = v;
+    });
+  }
 
   dispPreviewToggle.addEventListener('change', () => {
     toggleDisplacementPreview(dispPreviewToggle.checked);
@@ -5892,6 +5925,10 @@ const PERSISTED_KEYS = [
   'mappingBlend', 'seamBandWidth', 'capAngle', 'boundaryFalloff',
   'bottomAngleLimit', 'topAngleLimit',
   'refineLength', 'maxTriangles',
+  // Regularize tunings (Advanced panel) — read by _regularizeOpts()/pipeline.
+  'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
+  'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
+  'regularizeAggressiveNormalDeg',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -5966,6 +6003,13 @@ function applySettingsSnapshot(snap) {
   if (snap.maxTriangles != null) {
     maxTriSlider.value = snap.maxTriangles;
     maxTriSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Regularize tunings: write settings and sync the Advanced-panel inputs.
+  for (const [key, el] of Object.entries(_regTuningInputs)) {
+    if (snap[key] == null) continue;
+    settings[key] = snap[key];
+    if (el) el.value = snap[key];
   }
 
   // Restore saved lock state without invoking the button's click handler

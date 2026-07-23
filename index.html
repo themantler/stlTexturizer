@@ -591,6 +591,39 @@
             <label for="harvest-tol" title="Maximum surface deviation a flat-face collapse may introduce. Higher = more triangles removed, but larger deviation. ~0.005 mm is imperceptible for FDM; raise it to remove more." data-i18n-title="tooltips.harvestTol" data-i18n="ui.harvestTol">Flat tolerance (mm)</label>
             <input type="number" id="harvest-tol" class="val" min="0" max="1" step="0.005" value="0.005" />
           </div>
+
+          <h3 class="panel-subsection-heading">Regularize Mesh ⓘ</h3>
+          <p class="advanced-blurb">After subdividing, collapse sliver triangles from CAD tessellation (fan-tessellated faces, near-collinear "flat slivers") so each output triangle samples the texture coherently, then re-subdivide stretched edges back near the resolution target. Only the textured region is regularized — masked/untextured faces and other bodies are left as imported. Tune these if slivers still corrupt the texture.</p>
+          <div id="regularize-debug-rows" class="regularize-debug-rows">
+            <div class="form-row slider-row">
+              <label for="reg-second-pass-mul" title="Cap for the post-regularize re-subdivide = Resolution × this. Lower = denser re-subdivision (finer texture sampling near cleared slivers, more triangles); higher = fewer triangles but coarser sampling.">Re-subdivide cap (× target)</label>
+              <input type="number" id="reg-second-pass-mul" class="val" min="0.1" max="8" step="0.05" value="1.1" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-aspect-threshold" title="Triangles with thinness (longest edge / shortest altitude) above this become collapse candidates. Lower = more aggressive sliver detection.">Sliver threshold</label>
+              <input type="number" id="reg-aspect-threshold" class="val" min="1" max="50" step="0.1" value="5" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-slack" title="Base edge cap = Resolution × slack. Surviving collapses must keep new edges below this.">Edge slack (base)</label>
+              <input type="number" id="reg-slack" class="val" min="1" max="20" step="0.1" value="3.0" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-aggressive-slack" title="Loose edge cap used when at least one wing of the collapse is an extreme sliver. Higher = more aggressive sliver clearing, larger stretched edges (re-subdivided afterwards).">Edge slack (aggressive)</label>
+              <input type="number" id="reg-aggressive-slack" class="val" min="1" max="20" step="0.1" value="8.0" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-extreme-aspect" title="Thinness above which a wing counts as 'extreme', triggering the aggressive edge & normal caps. Higher = more conservative (protects fillets).">Extreme sliver threshold</label>
+              <input type="number" id="reg-extreme-aspect" class="val" min="1" max="100" step="0.5" value="8" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-normal-deg" title="Maximum normal swing per collapse (degrees). Lower = better feature preservation.">Normal change limit (°)</label>
+              <input type="number" id="reg-normal-deg" class="val" min="0" max="90" step="1" value="15" />
+            </div>
+            <div class="form-row slider-row">
+              <label for="reg-aggressive-normal-deg" title="Looser normal swing limit when both wings are extreme slivers. Higher = better chain-sliver dissolution, risk of bending fine fillets.">Aggressive normal limit (°)</label>
+              <input type="number" id="reg-aggressive-normal-deg" class="val" min="0" max="90" step="1" value="25" />
+            </div>
+          </div>
         </div>
       </section>
 		<section class="panel-section">

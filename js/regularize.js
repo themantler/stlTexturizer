@@ -199,6 +199,22 @@ export function regularizeMesh(geometry, faceParentId, maxEdgeLength, opts = {})
   // features (cube edges, chamfers) are bordered by well-shaped tris on
   // each side and are unaffected.
 const frozenVert = new Uint8Array(nextVid);
+  // ── Mask-aware freeze ──────────────────────────────────────────────────────
+  // When only part of a body is being textured, the caller passes per-vertex
+  // exclusion weights (excludeWeight ≈ 1 on masked / untextured faces, 0 on
+  // textured ones). Freeze every vertex that sits on masked geometry so
+  // regularization only reshapes the textured region and its immediate border,
+  // leaving the rest of the body exactly as imported. With no mask present
+  // (whole-body texturing) this is a no-op and the full body regularizes.
+  {
+    const maskAttr = geometry.attributes.excludeWeight;
+    if (maskAttr) {
+      const mw = maskAttr.array;
+      for (let i = 0; i < corners.length; i++) {
+        if (mw[i] >= 0.5) frozenVert[corners[i]] = 1;
+      }
+    }
+  }
   {
     const triThin2 = new Float32Array(triCount);
     for (let t = 0; t < triCount; t++) triThin2[t] = triAspectSq(t);
