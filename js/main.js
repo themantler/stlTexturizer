@@ -12,6 +12,7 @@ import { createPreviewMaterial, updateMaterial } from './previewMaterial.js';
 import { subdivide }          from './subdivision.js';
 import { regularizeMesh }     from './regularize.js';
 import { runExportPipeline, snapBottomToFlat } from './exportPipeline.js';
+import { decimate }           from './decimation.js';
 import { set3mfBodies, clear3mfBodies, get3mfBodies, exportSTL, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
@@ -4725,15 +4726,29 @@ async function handleExport(format = 'stl') {
               const src = (startTri + t) * 9;
               slicePos.set(srcPos.subarray(src, src + 9), t * 9);
             }
-            bodyFinal = new THREE.BufferGeometry();
-            bodyFinal.setAttribute('position', new THREE.BufferAttribute(slicePos, 3));
+            const slicedGeo = new THREE.BufferGeometry();
+            slicedGeo.setAttribute('position', new THREE.BufferAttribute(slicePos, 3));
             if (srcNrm) {
               const sliceNrm = new Float32Array(triCount * 9);
               for (let t = 0; t < triCount; t++) {
                 const src = (startTri + t) * 9;
                 sliceNrm.set(srcNrm.subarray(src, src + 9), t * 9);
               }
-              bodyFinal.setAttribute('normal', new THREE.BufferAttribute(sliceNrm, 3));
+              slicedGeo.setAttribute('normal', new THREE.BufferAttribute(sliceNrm, 3));
+            }
+            // Baked bodies carry their full displaced density — decimate the
+            // slice down to the per-body budget like every other export path.
+            if (triCount > perBodyBudget) {
+              bodyEvent(bi)('decimate', 0, { from: triCount, needsDecimation: true });
+              bodyFinal = await decimate(
+                slicedGeo, perBodyBudget,
+                (p) => bodyEvent(bi)('decimate', p, { from: triCount, needsDecimation: true }),
+                settings.harvestFlatFaces, settings.harvestTol
+              );
+              slicedGeo.dispose();
+              if (exportToken !== myToken) return;
+            } else {
+              bodyFinal = slicedGeo;
             }
           } else if (alreadyBaked && newPaintedLocal.size > 0) {
             // Baked body with new painted faces — slice existing baked geometry
