@@ -140,8 +140,11 @@ const settings = {
   regularizeSecondPassMul:   1.1,
   // Coplanar Delaunay edge-flip on flat textured faces (fixes sliver-following
   // tear lines). flattenAngleDeg = max dihedral treated as "flat".
+  // flattenGrain: 'even' (Delaunay) | 'downZ' (grain along −Z) | 'levelZ'
+  // (grain across −Z / horizontal).
   flattenSlivers:            true,
   flattenAngleDeg:           1,
+  flattenGrain:              'even',
 };
 
 // ── Electron memory-budget relaxation ────────────────────────────────────────
@@ -396,6 +399,8 @@ const harvestTolRow          = document.getElementById('harvest-tol-row');
 const flattenSliversChk      = document.getElementById('flatten-slivers-chk');
 const flattenAngleInput      = document.getElementById('flatten-angle');
 const flattenAngleRow        = document.getElementById('flatten-angle-row');
+const flattenGrainSelect     = document.getElementById('flatten-grain');
+const flattenGrainRow        = document.getElementById('flatten-grain-row');
 // Regularize tuning inputs (Advanced panel) → settings keys consumed by
 // _regularizeOpts() and the second-pass re-subdivide multiplier.
 const _regTuningInputs = {
@@ -1632,12 +1637,17 @@ function wireEvents() {
   }
 
   // Coplanar sliver-flatten toggle + flat-angle threshold.
+  const _syncFlattenRows = () => {
+    const on = settings.flattenSlivers;
+    if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !on);
+    if (flattenGrainRow) flattenGrainRow.classList.toggle('disabled', !on);
+  };
   if (flattenSliversChk) {
     flattenSliversChk.checked = settings.flattenSlivers;
-    if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !settings.flattenSlivers);
+    _syncFlattenRows();
     flattenSliversChk.addEventListener('change', () => {
       settings.flattenSlivers = flattenSliversChk.checked;
-      if (flattenAngleRow) flattenAngleRow.classList.toggle('disabled', !settings.flattenSlivers);
+      _syncFlattenRows();
     });
   }
   if (flattenAngleInput) {
@@ -1645,6 +1655,12 @@ function wireEvents() {
     flattenAngleInput.addEventListener('input', () => {
       const v = parseFloat(flattenAngleInput.value);
       if (Number.isFinite(v) && v > 0) settings.flattenAngleDeg = v;
+    });
+  }
+  if (flattenGrainSelect) {
+    flattenGrainSelect.value = settings.flattenGrain;
+    flattenGrainSelect.addEventListener('change', () => {
+      settings.flattenGrain = flattenGrainSelect.value;
     });
   }
 
@@ -5959,7 +5975,7 @@ const PERSISTED_KEYS = [
   'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
-  'flattenSlivers', 'flattenAngleDeg',
+  'flattenSlivers', 'flattenAngleDeg', 'flattenGrain',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -6050,6 +6066,10 @@ function applySettingsSnapshot(snap) {
   if (snap.flattenAngleDeg != null && flattenAngleInput) {
     settings.flattenAngleDeg = snap.flattenAngleDeg;
     flattenAngleInput.value = snap.flattenAngleDeg;
+  }
+  if (snap.flattenGrain != null && flattenGrainSelect) {
+    settings.flattenGrain = snap.flattenGrain;
+    flattenGrainSelect.value = snap.flattenGrain;
   }
 
   // Restore saved lock state without invoking the button's click handler

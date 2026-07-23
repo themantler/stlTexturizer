@@ -605,6 +605,14 @@
             <label for="flatten-angle" title="Max angle between two triangles for their shared edge to count as 'flat' and be re-oriented. ~1° = only truly coplanar faces (safest). Raise to also clean very gently curved surfaces, at the risk of subtly shifting their shading.">Flat threshold (°)</label>
             <input type="number" id="flatten-angle" class="val" min="0.1" max="15" step="0.1" value="1" />
           </div>
+          <div class="form-row" id="flatten-grain-row">
+            <label for="flatten-grain" title="Even = Delaunay (well-shaped, no preferred direction). Grain down = orient triangle long-edges along the downhill (−Z) direction of each flat face. Grain level = orient them horizontally (across −Z). Faces perpendicular to Z fall back to Even.">Triangle grain</label>
+            <select id="flatten-grain">
+              <option value="even" selected>Even (Delaunay)</option>
+              <option value="downZ">Grain down (−Z)</option>
+              <option value="levelZ">Grain level (⟂ Z)</option>
+            </select>
+          </div>
           <div id="regularize-debug-rows" class="regularize-debug-rows">
             <div class="form-row slider-row">
               <label for="reg-second-pass-mul" title="Cap for the post-regularize re-subdivide = Resolution × this. Lower = denser re-subdivision (finer texture sampling near cleared slivers, more triangles); higher = fewer triangles but coarser sampling.">Re-subdivide cap (× target)</label>

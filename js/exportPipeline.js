@@ -255,7 +255,14 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     if (settings.flattenSlivers !== false) {
       onEvent('flatten', 0);
       await yieldFrame();
-      const flat = flipCoplanarToDelaunay(subdivided, { flatAngleDeg: settings.flattenAngleDeg ?? 1 });
+      // Grain mode: 'even' = Delaunay; 'downZ'/'levelZ' = orient the triangle
+      // grain along / across the in-plane projection of world −Z (toward the
+      // lowest point on Z). Extendable to other axes via axisDir.
+      const g = settings.flattenGrain || 'even';
+      const grainOpts = g === 'downZ'  ? { grain: 'along',  axisDir: [0, 0, -1] }
+                      : g === 'levelZ' ? { grain: 'across', axisDir: [0, 0, -1] }
+                      :                  { grain: 'even' };
+      const flat = flipCoplanarToDelaunay(subdivided, { flatAngleDeg: settings.flattenAngleDeg ?? 1, ...grainOpts });
       if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
       if (shouldAbort()) return null;
     }

@@ -48,6 +48,14 @@ export function flipCoplanarToDelaunay(geometry, opts = {}) {
   const flatAngleDeg = opts.flatAngleDeg ?? 1;
   const maxPasses    = opts.maxPasses ?? 8;
   const cosFlat      = Math.cos(flatAngleDeg * Math.PI / 180);
+  // Grain control. 'even' = classic Delaunay (fattest triangles, no preferred
+  // direction). 'along'/'across' = bias the kept diagonal to run parallel /
+  // perpendicular to a world reference direction projected onto each face, so
+  // the triangle "grain" follows (or crosses) that axis. axisDir defaults to
+  // world −Z ("toward the lowest point on Z" → grain runs downhill).
+  const grain    = opts.grain || 'even';
+  const axisDir  = opts.axisDir || [0, 0, -1];
+  const ALIGN_EPS = 1e-3;   // min alignment gain to accept a directional flip
 
   const posAttr  = geometry.attributes.position;
   const ewAttr   = geometry.attributes.excludeWeight || null;
@@ -161,14 +169,44 @@ export function flipCoplanarToDelaunay(geometry, opts = {}) {
       const pv = apexOf(t0, u, v), qv = apexOf(t1, u, v);
       if (pv === qv) continue;
 
-      // Delaunay (Lawson): flip iff the two apex angles sum to > 180°.
-      const eps = 1e-6;
-      if (angleAt(pv, u, v) + angleAt(qv, u, v) <= Math.PI + eps) continue;
+      const nrx = nX[t0], nry = nY[t0], nrz = nZ[t0];
+
+      // Decide whether this edge should flip, per grain mode. The two candidate
+      // shared diagonals are the current edge (u,v) and the alternative (pv,qv);
+      // flipping keeps whichever this mode prefers.
+      let want;
+      if (grain === 'even') {
+        // Delaunay (Lawson): flip iff the two apex angles sum to > 180°
+        // (i.e. the current diagonal is non-Delaunay).
+        want = angleAt(pv, u, v) + angleAt(qv, u, v) > Math.PI + 1e-6;
+      } else {
+        // Directional: project the world reference direction onto this face,
+        // then keep the diagonal most parallel ('along') / perpendicular
+        // ('across') to it, so the triangle grain follows / crosses the axis.
+        const an = axisDir[0]*nrx + axisDir[1]*nry + axisDir[2]*nrz;
+        let dx = axisDir[0]-an*nrx, dy = axisDir[1]-an*nry, dz = axisDir[2]-an*nrz;
+        const dl = Math.hypot(dx, dy, dz);
+        if (dl < 1e-6) {
+          // Face ≈ perpendicular to the axis → no in-plane direction; keep the
+          // mesh well-shaped via Delaunay instead.
+          want = angleAt(pv, u, v) + angleAt(qv, u, v) > Math.PI + 1e-6;
+        } else {
+          dx/=dl; dy/=dl; dz/=dl;
+          const align = (i, j) => {                    // |cos| of diagonal vs d, 0..1
+            const ex=vx[j]-vx[i], ey=vy[j]-vy[i], ez=vz[j]-vz[i];
+            const l = Math.hypot(ex, ey, ez) || 1;
+            return Math.abs(ex*dx + ey*dy + ez*dz) / l;
+          };
+          const alCur = align(u, v), alAlt = align(pv, qv);
+          want = grain === 'across' ? (alAlt < alCur - ALIGN_EPS)
+                                    : (alAlt > alCur + ALIGN_EPS);
+        }
+      }
+      if (!want) continue;
 
       // Convex quad check: segments (u,v) and (pv,qv) must actually cross, i.e.
       // u,v lie on opposite sides of line pv-qv and vice-versa. Work in the
       // triangle plane via a 2D basis (e1 along u→v, e2 = n × e1).
-      const nrx = nX[t0], nry = nY[t0], nrz = nZ[t0];
       let e1x = vx[v]-vx[u], e1y = vy[v]-vy[u], e1z = vz[v]-vz[u];
       const el = Math.hypot(e1x, e1y, e1z) || 1; e1x/=el; e1y/=el; e1z/=el;
       const e2x = nry*e1z - nrz*e1y, e2y = nrz*e1x - nrx*e1z, e2z = nrx*e1y - nry*e1x;
