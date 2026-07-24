@@ -596,10 +596,17 @@
           <p class="advanced-blurb">After subdividing, collapse sliver triangles from CAD tessellation (fan-tessellated faces, near-collinear "flat slivers") so each output triangle samples the texture coherently, then re-subdivide stretched edges back near the resolution target. Only the textured region is regularized — masked/untextured faces and other bodies are left as imported. Tune these if slivers still corrupt the texture.</p>
           <div class="form-row">
             <label class="checkbox-label" for="flatten-slivers-chk"
-              title="On flat textured faces, re-orient triangles (Delaunay edge-flip) so the mesh follows the face instead of the CAD tessellation's long sliver edges. Fixes texture tear lines that follow the original slivers. Vertices are never moved, so geometry is unchanged.">
+              title="On flat textured faces, fix the triangle layout so the mesh follows the face instead of the CAD tessellation's slivers/fans. Vertices on the boundary are never moved, so geometry stays watertight.">
               <input type="checkbox" id="flatten-slivers-chk" checked />
               <span>Flatten sliver orientation on flat faces</span>
             </label>
+          </div>
+          <div class="form-row" id="flatten-method-row">
+            <label for="flatten-method" title="Flip = reconnect the existing vertices to Delaunay (fast; cannot fix the fan point spacing). Remesh = discard each flat face's fan interior and rebuild a uniform triangle lattice at the resolution target (best quality; slower; changes flat-face triangle count).">Flat face method</label>
+            <select id="flatten-method">
+              <option value="flip" selected>Delaunay flip (reconnect)</option>
+              <option value="remesh">Uniform remesh (rebuild)</option>
+            </select>
           </div>
           <div class="form-row slider-row" id="flatten-angle-row">
             <label for="flatten-angle" title="Max angle between two triangles for their shared edge to count as 'flat' and be re-oriented. ~1° = only truly coplanar faces (safest). Raise to also clean very gently curved surfaces, at the risk of subtly shifting their shading.">Flat threshold (°)</label>
