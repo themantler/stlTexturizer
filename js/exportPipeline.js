@@ -222,7 +222,13 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     // Regularize sub-slivers, then re-subdivide stretched edges. Skipped when
     // the Advanced toggle is off. Export mode passes a zero parent map (it
     // doesn't consume parents); bake mode threads + composes the real one.
-    if (settings.regularizeEnabled) {
+    // Uniform remesh discards each flat face's interior and rebuilds it, so
+    // regularizing those faces first is pure wasted time — the remesh IS the
+    // strongest possible regularization for a flat face. Skipped wholesale when
+    // that method is active.
+    const _doRegularize = settings.regularizeEnabled
+      && !(settings.flattenSlivers !== false && settings.flattenMethod === 'remesh');
+    if (_doRegularize) {
       onEvent('regularize', 0);
       await yieldFrame();
       const regParents = mode === 'bake'
@@ -256,25 +262,26 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     if (settings.flattenSlivers !== false) {
       onEvent('flatten', 0);
       await yieldFrame();
-      let flat;
       if (settings.flattenMethod === 'remesh') {
         // Isotropic remesh: discard each flat face's fan interior and refill
         // with a uniform triangle lattice at the resolution target. Fixes the
         // point DISTRIBUTION that edge-flipping can't (fan-radiating vertices).
-        flat = remeshFlatRegions(subdivided, {
+        // The rebuild changes the triangle set, so bake's parent map is
+        // remapped alongside it (else exclusions / painting adjacency break).
+        const res = remeshFlatRegions(subdivided, {
           targetLen: settings.refineLength,
           flatAngleDeg: settings.flattenAngleDeg ?? 1,
+          faceParentId: mode === 'bake' ? faceParentId : null,
         });
+        if (res.geometry !== subdivided) { subdivided.dispose(); subdivided = res.geometry; }
+        if (mode === 'bake' && res.faceParentId) faceParentId = res.faceParentId;
       } else {
         // Delaunay edge-flip: reconnect the existing vertices to Delaunay.
-        // Grain: 'even' = Delaunay; 'downZ'/'levelZ' = orient along / across −Z.
-        const g = settings.flattenGrain || 'even';
-        const grainOpts = g === 'downZ'  ? { grain: 'along',  axisDir: [0, 0, -1] }
-                        : g === 'levelZ' ? { grain: 'across', axisDir: [0, 0, -1] }
-                        :                  { grain: 'even' };
-        flat = flipCoplanarToDelaunay(subdivided, { flatAngleDeg: settings.flattenAngleDeg ?? 1, ...grainOpts });
+        // Triangle count and slot identity are preserved, so faceParentId
+        // stays valid as-is.
+        const flat = flipCoplanarToDelaunay(subdivided, { flatAngleDeg: settings.flattenAngleDeg ?? 1 });
+        if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
       }
-      if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
       if (shouldAbort()) return null;
     }
 

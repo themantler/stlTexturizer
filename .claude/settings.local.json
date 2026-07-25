@@ -59,7 +59,25 @@
       "Bash(node --max-old-space-size=8192 test-laserplate.mjs)",
       "Bash(node --max-old-space-size=8192 bench-tri-estimate.mjs)",
       "Bash(node --max-old-space-size=8192 bench-sim-timing.mjs)",
-      "Bash(node --max-old-space-size=8192 -e ' *)"
+      "Bash(node --max-old-space-size=8192 -e ' *)",
+      "Bash(cd /d/STLTexturizer/merge-trial && sed -n '4941,4990p' js/main.js)",
+      "Bash(grep -n *)",
+      "Bash(node --check js/regularize.js)",
+      "Bash(npx --yes acorn --help)",
+      "Bash(node -e \"import\\('./js/regularize.js'\\).catch\\(e=>{console.error\\('ERR',e.message\\)}\\)\")",
+      "Bash(python -c *)",
+      "Bash(python -)",
+      "Bash(awk 'NR>=6386 && NR<=6560' js/main.js)",
+      "Bash(echo \"grep-exit:$?\")",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(npx --yes esbuild js/main.js js/exporter.js js/exclusion.js js/regularize.js js/stlLoader.js js/displacement.js --outdir=/tmp/esb-check --format=esm --log-level=error)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Merge upstream/main: worker export pipeline, mesh fixes, 32M cap *)",
+      "Bash(npx --yes esbuild js/main.js --outfile=/tmp/esb-main.js --format=esm --log-level=error)",
+      "Bash(git commit -q -m 'Always-on regularization: drop stale preset UI references *)",
+      "Bash(git commit -q -m 'Electron: raise memory-gated caps from real RAM \\(preload-reported\\) *)",
+      "Bash(npx --yes esbuild js/main.js js/subdivision.js js/exportPipeline.js js/stlLoader.js --outdir=/tmp/esb2 --format=esm --log-level=error)",
+      "Bash(npx --yes esbuild js/main.js js/subdivision.js js/exportPipeline.js js/stlLoader.js js/exporter.js --outdir=/tmp/esb2 --format=esm --log-level=error)"
     ]
   }
 }

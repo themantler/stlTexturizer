@@ -234,22 +234,40 @@ export function cdt2d(pts, segs, inDomain) {
 // ───────────────────────── per-face isotropic remesh ────────────────────────
 /**
  * Re-mesh flat textured faces with a uniform triangle lattice.
+ *
+ * Lattice spacing is targetLen × LATTICE_FACTOR. The factor exists because
+ * subdivision splits any edge LONGER than the resolution target, leaving edges
+ * distributed in [0.5, 1.0] × target (mean ≈ 0.75), whereas a lattice at
+ * spacing h has edges of exactly h. Using h = target directly therefore
+ * produced a visibly coarser face (~2× fewer triangles, lower texture detail)
+ * than the flip path at the same slider value, and its boundary-fan edges could
+ * even exceed the target. 0.7 matches subdivision's effective density and keeps
+ * every edge under the target.
+ *
  * @param {THREE.BufferGeometry} geometry  non-indexed; position (+ excludeWeight)
  * @param {object} [opts]
- *   targetLen     interior lattice spacing (default 1 = refineLength)
+ *   targetLen     resolution target (default 1 = refineLength)
  *   flatAngleDeg  max dihedral to join a flat region (default 1)
- * @returns {THREE.BufferGeometry} new non-indexed geometry (position, normal,
- *   excludeWeight). Flat faces re-meshed uniformly; everything else passed through.
+ *   faceParentId  Int32Array per input triangle → original face id. When given,
+ *                 each new lattice triangle inherits the parent of whichever
+ *                 original region triangle contains its centroid, so bake's
+ *                 parent map (exclusions, per-body mapping, painting adjacency)
+ *                 survives the rebuild.
+ * @returns {{geometry: THREE.BufferGeometry, faceParentId: Int32Array|null}}
+ *   Flat faces re-meshed uniformly; everything else passed through unchanged.
  */
+const LATTICE_FACTOR = 0.7;
+
 export function remeshFlatRegions(geometry, opts = {}) {
   const targetLen    = opts.targetLen ?? 1;
   const flatAngleDeg = opts.flatAngleDeg ?? 1;
   const sinFlat      = Math.sin(flatAngleDeg * Math.PI / 180);
+  const parentIn     = opts.faceParentId || null;
 
   const posAttr  = geometry.attributes.position;
   const ewAttr   = geometry.attributes.excludeWeight || null;
   const triCount = (posAttr.count / 3) | 0;
-  if (triCount < 2) return geometry;
+  if (triCount < 2) return { geometry, faceParentId: parentIn };
 
   // Weld corners → unique vertices.
   const nCorner = triCount * 3;
@@ -333,14 +351,15 @@ export function remeshFlatRegions(geometry, opts = {}) {
   for (let t = 0; t < triCount; t++) if (regionId[t] >= 0) regionTris[regionId[t]].push(t);
 
   // Output accumulators.
-  const outP=[], outN=[], outW=[];
+  const outP=[], outN=[], outW=[], outParent=[];
   const remeshed = new Uint8Array(regionNX.length);
-  const pushTri=(p0,p1,p2,w0,w1,w2)=>{
+  const pushTri=(p0,p1,p2,w0,w1,w2,par)=>{
     const e1x=p1[0]-p0[0],e1y=p1[1]-p0[1],e1z=p1[2]-p0[2], e2x=p2[0]-p0[0],e2y=p2[1]-p0[1],e2z=p2[2]-p0[2];
     let nx=e1y*e2z-e1z*e2y,ny=e1z*e2x-e1x*e2z,nz=e1x*e2y-e1y*e2x; const l=Math.hypot(nx,ny,nz)||1; nx/=l;ny/=l;nz/=l;
     outP.push(p0[0],p0[1],p0[2],p1[0],p1[1],p1[2],p2[0],p2[1],p2[2]);
     outN.push(nx,ny,nz,nx,ny,nz,nx,ny,nz);
     if(ewv) outW.push(w0,w1,w2);
+    if(parentIn) outParent.push(par|0);
   };
 
   for (let r = 0; r < regionNX.length; r++) {
@@ -385,7 +404,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
     const inDom=(x,y)=>pointInLoops(x,y,loops2d);
     let mnx=Infinity,mny=Infinity,mxx=-Infinity,mxy=-Infinity;
     for(const [x,y] of pts2d){ if(x<mnx)mnx=x; if(y<mny)mny=y; if(x>mxx)mxx=x; if(y>mxy)mxy=y; }
-    const h=Math.max(targetLen, 1e-6);
+    const h=Math.max(targetLen * LATTICE_FACTOR, 1e-6);
     const rowH=h*Math.sqrt(3)/2; const minGap=0.5*h;
     const distToBoundary=(x,y)=>{ let best=Infinity;
       for(const lp of loops2d){ for(let i=0,j=lp.length-1;i<lp.length;j=i++){
@@ -406,23 +425,73 @@ export function remeshFlatRegions(geometry, opts = {}) {
     let tris;
     try { tris = cdt2d(pts2d, segs, inDom); } catch(e) { tris=null; }
     if(!tris || tris.length===0) continue;
-    for(const [a,b,c] of tris) pushTri(pt3d[a], pt3d[b], pt3d[c], 0, 0, 0);
+
+    // Parent inheritance: locate each new triangle's centroid among the region's
+    // ORIGINAL triangles (projected to the same 2D basis) so bake keeps a valid
+    // parent map. Bucketed on a uniform grid for speed; nearest-centroid
+    // fallback covers points that miss every cell (numerical edge cases).
+    let locate = null;
+    if (parentIn) {
+      const rTris = regionTris[r];
+      const A = new Float64Array(rTris.length * 6);
+      const cxs = new Float64Array(rTris.length), cys = new Float64Array(rTris.length);
+      for (let k = 0; k < rTris.length; k++) {
+        const b = rTris[k]*3;
+        const P0=proj(triV[b]), P1=proj(triV[b+1]), P2=proj(triV[b+2]);
+        A[k*6]=P0[0]; A[k*6+1]=P0[1]; A[k*6+2]=P1[0]; A[k*6+3]=P1[1]; A[k*6+4]=P2[0]; A[k*6+5]=P2[1];
+        cxs[k]=(P0[0]+P1[0]+P2[0])/3; cys[k]=(P0[1]+P1[1]+P2[1])/3;
+      }
+      const cell = Math.max(h, (mxx-mnx+mxy-mny) / 128 || h);
+      const gw = Math.max(1, Math.ceil((mxx-mnx)/cell)+1), gh = Math.max(1, Math.ceil((mxy-mny)/cell)+1);
+      const buckets = new Map();
+      const cellKey = (ix,iy) => iy*gw+ix;
+      for (let k = 0; k < rTris.length; k++) {
+        let x0=Math.min(A[k*6],A[k*6+2],A[k*6+4]), x1=Math.max(A[k*6],A[k*6+2],A[k*6+4]);
+        let y0=Math.min(A[k*6+1],A[k*6+3],A[k*6+5]), y1=Math.max(A[k*6+1],A[k*6+3],A[k*6+5]);
+        const ix0=Math.max(0,Math.floor((x0-mnx)/cell)), ix1=Math.min(gw-1,Math.floor((x1-mnx)/cell));
+        const iy0=Math.max(0,Math.floor((y0-mny)/cell)), iy1=Math.min(gh-1,Math.floor((y1-mny)/cell));
+        for(let iy=iy0;iy<=iy1;iy++) for(let ix=ix0;ix<=ix1;ix++){
+          const kk=cellKey(ix,iy); let arr=buckets.get(kk); if(!arr){arr=[];buckets.set(kk,arr);} arr.push(k); }
+      }
+      const inTri2 = (k,x,y) => {
+        const ax=A[k*6],ay=A[k*6+1],bx=A[k*6+2],by=A[k*6+3],cx2=A[k*6+4],cy2=A[k*6+5];
+        const d1=orient2d(ax,ay,bx,by,x,y), d2=orient2d(bx,by,cx2,cy2,x,y), d3=orient2d(cx2,cy2,ax,ay,x,y);
+        return (d1>=-1e-9&&d2>=-1e-9&&d3>=-1e-9) || (d1<=1e-9&&d2<=1e-9&&d3<=1e-9);
+      };
+      locate = (x,y) => {
+        const ix=Math.max(0,Math.min(gw-1,Math.floor((x-mnx)/cell))), iy=Math.max(0,Math.min(gh-1,Math.floor((y-mny)/cell)));
+        const arr=buckets.get(cellKey(ix,iy));
+        if(arr) for(const k of arr) if(inTri2(k,x,y)) return parentIn[rTris[k]];
+        let best=-1,bd=Infinity;
+        for(let k=0;k<rTris.length;k++){ const dd=(cxs[k]-x)**2+(cys[k]-y)**2; if(dd<bd){bd=dd;best=k;} }
+        return best>=0 ? parentIn[rTris[best]] : 0;
+      };
+    }
+
+    for(const [a,b,c] of tris) {
+      let par = 0;
+      if (locate) {
+        const gx=(pts2d[a][0]+pts2d[b][0]+pts2d[c][0])/3, gy=(pts2d[a][1]+pts2d[b][1]+pts2d[c][1])/3;
+        par = locate(gx, gy);
+      }
+      pushTri(pt3d[a], pt3d[b], pt3d[c], 0, 0, 0, par);
+    }
     remeshed[r]=1;
   }
 
-  // Pass through everything not remeshed.
+  // Pass through everything not remeshed (masked, curved, failed regions).
   for (let t=0;t<triCount;t++){
     const r=regionId[t];
     if(r>=0 && remeshed[r]) continue;
     const b=t*3;
     const P=[]; const W=[];
     for(let k=0;k<3;k++){ const id=triV[b+k]; P.push([vx[id],vy[id],vz[id]]); W.push(ewv?ewv[id]:0); }
-    pushTri(P[0],P[1],P[2],W[0],W[1],W[2]);
+    pushTri(P[0],P[1],P[2],W[0],W[1],W[2], parentIn ? parentIn[t] : 0);
   }
 
   const out=new THREE.BufferGeometry();
   out.setAttribute('position', new THREE.BufferAttribute(new Float32Array(outP),3));
   out.setAttribute('normal',   new THREE.BufferAttribute(new Float32Array(outN),3));
   if(ewv) out.setAttribute('excludeWeight', new THREE.BufferAttribute(new Float32Array(outW),1));
-  return out;
+  return { geometry: out, faceParentId: parentIn ? new Int32Array(outParent) : null };
 }

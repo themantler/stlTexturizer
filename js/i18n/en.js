@@ -104,7 +104,7 @@ export default {
   "ui.rotateReset": "Reset",
   "progress.subdividingPreview": "Preparing preview…",
   "warnings.textureHeightOverlap": "⚠ Texture height exceeds 10% of the smallest model dimension — geometry overlaps may occur in the exported STL.",
-  "sections.advancedFeatures": "Advanced / Beta Features ⓘ",
+  "sections.advancedFeatures": "Advanced Features ⓘ",
   "tooltips.advancedFeatures": "Experimental tools — behavior may change between releases.",
   "ui.advancedBlurb": "Experimental tools. Behavior may change between releases.",
   "ui.bakeTexturesHeading": "Bake Textures",

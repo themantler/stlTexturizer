@@ -196,11 +196,6 @@
             </button>
           </div>
         </div>
-        <div id="store-cta-wrapper">
-          <span id="store-cta">
-            <span data-i18n-html="cta.store">Support this tool? Shop at <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer">CNCKitchen.STORE</a> or send a tip via <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer">PayPal</a> / <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer">Ko-fi</a></span><button id="store-cta-dismiss" aria-label="Dismiss">&times;</button>
-          </span>
-        </div>
       </div>
       <div id="viewport-footer">
         <span id="mesh-info" class="mesh-info"></span>
@@ -556,33 +551,34 @@
             data-i18n-title="tooltips.advancedFeatures"
             title="Experimental tools — behavior may change between releases.">
           <span class="advanced-chevron" aria-hidden="true">▸</span>
-          Advanced / Beta Features ⓘ
+          Advanced Features ⓘ
         </h2>
         <div class="advanced-content" id="advanced-content">
-          <p class="advanced-blurb" data-i18n="ui.advancedBlurb">Experimental tools. Behavior may change between releases.</p>
-
           <h3 class="panel-subsection-heading" data-i18n="ui.noDownwardZHeading">Overhang Protection</h3>
-          <p class="advanced-blurb" data-i18n="ui.noDownwardZDesc">Some textures push surface vertices downward, creating new overhangs. When enabled, vertices are never moved in the −Z direction during texturing. X and Y movement is unaffected.</p>
           <div class="form-row">
-            <label class="checkbox-label" for="no-downward-z-chk">
+            <label class="checkbox-label" for="no-downward-z-chk"
+              data-i18n-title="ui.noDownwardZDesc"
+              title="Some textures push surface vertices downward, creating new overhangs. When enabled, vertices are never moved in the −Z direction during texturing. X and Y movement is unaffected.">
               <input type="checkbox" id="no-downward-z-chk" />
               <span data-i18n="ui.noDownwardZ">Prevent downward (−Z) vertex displacement</span>
             </label>
           </div>
 
           <h3 class="panel-subsection-heading" data-i18n="ui.smoothBottomHeading">Smooth Bottom</h3>
-          <p class="advanced-blurb" data-i18n="ui.smoothBottomDesc">Snap any vertex within 0.1 mm of the bottom plane onto it after texturing. Keeps the bed-contact surface perfectly flat so slicers don't shade tiny height variations on bottom slivers.</p>
           <div class="form-row">
-            <label class="checkbox-label" for="smooth-bottom-chk">
+            <label class="checkbox-label" for="smooth-bottom-chk"
+              data-i18n-title="ui.smoothBottomDesc"
+              title="Snap any vertex within 0.1 mm of the bottom plane onto it after texturing. Keeps the bed-contact surface perfectly flat so slicers don't shade tiny height variations on bottom slivers.">
               <input type="checkbox" id="smooth-bottom-chk" checked />
               <span data-i18n="ui.smoothBottom">Snap near-bottom vertices to the bottom plane</span>
             </label>
           </div>
 
           <h3 class="panel-subsection-heading" data-i18n="ui.harvestFlatHeading">Harvest Flat Faces</h3>
-          <p class="advanced-blurb" data-i18n="ui.harvestFlatDesc">When decimation reaches the triangle limit there are often still flat faces left that cost almost nothing to remove. With this on, decimation keeps collapsing them past the limit — as long as each collapse moves the surface less than the tolerance below — saving extra triangles without losing visible detail.</p>
           <div class="form-row">
-            <label class="checkbox-label" for="harvest-flat-chk">
+            <label class="checkbox-label" for="harvest-flat-chk"
+              data-i18n-title="ui.harvestFlatDesc"
+              title="When decimation reaches the triangle limit there are often still flat faces left that cost almost nothing to remove. With this on, decimation keeps collapsing them past the limit — as long as each collapse moves the surface less than the tolerance below — saving extra triangles without losing visible detail.">
               <input type="checkbox" id="harvest-flat-chk" checked />
               <span data-i18n="ui.harvestFlat">Keep collapsing flat faces below the triangle limit</span>
             </label>
@@ -592,8 +588,7 @@
             <input type="number" id="harvest-tol" class="val" min="0" max="1" step="0.005" value="0.005" />
           </div>
 
-          <h3 class="panel-subsection-heading">Regularize Mesh ⓘ</h3>
-          <p class="advanced-blurb">After subdividing, collapse sliver triangles from CAD tessellation (fan-tessellated faces, near-collinear "flat slivers") so each output triangle samples the texture coherently, then re-subdivide stretched edges back near the resolution target. Only the textured region is regularized — masked/untextured faces and other bodies are left as imported. Tune these if slivers still corrupt the texture.</p>
+          <h3 class="panel-subsection-heading" title="After subdividing, collapse sliver triangles from CAD tessellation so each output triangle samples the texture coherently, then re-subdivide stretched edges back near the resolution target. Only the textured region is regularized — masked/untextured faces and other bodies are left as imported. Skipped entirely when the flat-face method below is Uniform remesh, which supersedes it.">Regularize Mesh ⓘ</h3>
           <div class="form-row">
             <label class="checkbox-label" for="flatten-slivers-chk"
               title="On flat textured faces, fix the triangle layout so the mesh follows the face instead of the CAD tessellation's slivers/fans. Vertices on the boundary are never moved, so geometry stays watertight.">
@@ -611,14 +606,6 @@
           <div class="form-row slider-row" id="flatten-angle-row">
             <label for="flatten-angle" title="Max angle between two triangles for their shared edge to count as 'flat' and be re-oriented. ~1° = only truly coplanar faces (safest). Raise to also clean very gently curved surfaces, at the risk of subtly shifting their shading.">Flat threshold (°)</label>
             <input type="number" id="flatten-angle" class="val" min="0.1" max="15" step="0.1" value="1" />
-          </div>
-          <div class="form-row" id="flatten-grain-row">
-            <label for="flatten-grain" title="Even = Delaunay (well-shaped, no preferred direction). Grain down = orient triangle long-edges along the downhill (−Z) direction of each flat face. Grain level = orient them horizontally (across −Z). Faces perpendicular to Z fall back to Even.">Triangle grain</label>
-            <select id="flatten-grain">
-              <option value="even" selected>Even (Delaunay)</option>
-              <option value="downZ">Grain down (−Z)</option>
-              <option value="levelZ">Grain level (⟂ Z)</option>
-            </select>
           </div>
           <div id="regularize-debug-rows" class="regularize-debug-rows">
             <div class="form-row slider-row">
@@ -738,29 +725,6 @@
         <li data-i18n-html="imprint.privacyExternal">This site contains links to external websites (e.g., CNCKitchen.STORE, PayPal, Ko-fi). These sites have their own privacy policies, over which we have no control.</li>
         <li data-i18n-html="imprint.privacyRights">Under the GDPR you have the right to <strong>access, rectification, erasure, restriction of processing, data portability</strong>, and the right to <strong>lodge a complaint</strong> with a supervisory authority.</li>
       </ul>
-    </div>
-  </div>
-
-  <!-- Sponsor popup -->
-  <div id="sponsor-overlay" class="sponsor-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="sponsor-title">
-    <div class="sponsor-modal">
-      <h2 id="sponsor-title" data-i18n="sponsor.title">Thanks for using BumpMesh by CNC Kitchen!</h2>
-      <p data-i18n-html="sponsor.body">This tool is provided <strong>completely free</strong> by CNC Kitchen.<br>
-      While your STL is being processed, why not check out the store that helps us keep making cool stuff for you?</p>
-      <a href="https://geni.us/CNCStoreTexture" target="_blank" rel="noopener noreferrer" class="sponsor-link" data-i18n="sponsor.visitStore">
-        🛒 Visit CNCKitchen.STORE
-      </a>
-      <a href="https://www.paypal.me/CNCKitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--paypal" data-i18n="sponsor.donate">
-        💙 Send a tip on PayPal
-      </a>
-      <a href="https://ko-fi.com/cnckitchen" target="_blank" rel="noopener noreferrer" class="sponsor-link sponsor-link--kofi" data-i18n="sponsor.donateKofi">
-        ☕ Send a tip on Ko-fi
-      </a>
-      <label class="sponsor-no-show">
-        <input type="checkbox" id="sponsor-dont-show" />
-        <span data-i18n="sponsor.dontShow">Don't show this again</span>
-      </label>
-      <button id="sponsor-close" class="sponsor-close-btn" data-i18n-html="sponsor.closeAndContinue">Close &amp; Continue</button>
     </div>
   </div>
 

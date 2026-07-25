@@ -28,20 +28,11 @@
  * with a different plane, a masked/untextured face, or an open edge — are never
  * flipped, so each face stays watertight against its neighbours.
  *
- * Grain (opts.grain): 'even' = Delaunay (well-shaped, no preferred direction).
- * 'along' / 'across' bias the kept diagonal parallel / perpendicular to a world
- * reference direction (opts.axisDir, default −Z) projected onto the face, so the
- * triangle grain follows / crosses that axis. Region planes (stable) drive the
- * projection. NOTE: directional modes trade away Delaunay quality and can
- * reintroduce thin triangles; 'even' is the recommended default.
- *
  * @param {THREE.BufferGeometry} geometry  non-indexed; position (+ optional
  *                                          excludeWeight) attributes
  * @param {object} [opts]
  *   flatAngleDeg  max dihedral (vs the region plane) to join a region (default 1)
  *   maxPasses     per-region Lawson sweep cap (default 50; converges early)
- *   grain         'even' | 'along' | 'across'   (default 'even')
- *   axisDir       world reference direction for directional grain (default [0,0,-1])
  * @returns {THREE.BufferGeometry} new non-indexed geometry (position, normal,
  *   and excludeWeight if the input had it). Same vertex set, re-triangulated.
  */
@@ -55,9 +46,6 @@ export function flipCoplanarToDelaunay(geometry, opts = {}) {
   const flatAngleDeg = opts.flatAngleDeg ?? 1;
   const maxPasses    = opts.maxPasses ?? 50;
   const sinFlat      = Math.sin(flatAngleDeg * Math.PI / 180);
-  const grain        = opts.grain || 'even';
-  const axisDir      = opts.axisDir || [0, 0, -1];
-  const ALIGN_EPS    = 1e-3;
 
   const posAttr  = geometry.attributes.position;
   const ewAttr   = geometry.attributes.excludeWeight || null;
@@ -252,30 +240,12 @@ export function flipCoplanarToDelaunay(geometry, opts = {}) {
       const pv = apexOf(t0, u, v), qv = apexOf(t1, u, v);
       if (pv === qv) continue;
 
-      // Stable region plane normal drives winding + directional projection.
+      // Stable region plane normal drives the winding + 2D projection below.
       const nrx = regionNX[r], nry = regionNY[r], nrz = regionNZ[r];
 
-      let want;
-      if (grain === 'even') {
-        want = angleAt(pv, u, v) + angleAt(qv, u, v) > Math.PI + 1e-6; // non-Delaunay
-      } else {
-        const an = axisDir[0]*nrx + axisDir[1]*nry + axisDir[2]*nrz;
-        let dx = axisDir[0]-an*nrx, dy = axisDir[1]-an*nry, dz = axisDir[2]-an*nrz;
-        const dl = Math.hypot(dx, dy, dz);
-        if (dl < 1e-6) {
-          want = angleAt(pv, u, v) + angleAt(qv, u, v) > Math.PI + 1e-6;
-        } else {
-          dx/=dl; dy/=dl; dz/=dl;
-          const align = (i,j) => {
-            const ex=vx[j]-vx[i], ey=vy[j]-vy[i], ez=vz[j]-vz[i];
-            const l = Math.hypot(ex,ey,ez) || 1;
-            return Math.abs(ex*dx+ey*dy+ez*dz)/l;
-          };
-          const alCur = align(u, v), alAlt = align(pv, qv);
-          want = grain === 'across' ? (alAlt < alCur - ALIGN_EPS) : (alAlt > alCur + ALIGN_EPS);
-        }
-      }
-      if (!want) continue;
+      // Lawson: flip only when the current diagonal is non-Delaunay, so each
+      // flip strictly improves the minimum angle and sweeps converge.
+      if (angleAt(pv, u, v) + angleAt(qv, u, v) <= Math.PI + 1e-6) continue;
 
       // Convex crossing check in the region plane (2D basis e1 = u→v, e2 = n×e1).
       let e1x=vx[v]-vx[u], e1y=vy[v]-vy[u], e1z=vz[v]-vz[u];

@@ -37,6 +37,13 @@ let currentPoseRot    = new THREE.Quaternion();
 let currentPoseTrans  = new THREE.Vector3();
 let _rotatePoseSnapshot = null; // { rot, trans } captured on rotate-mode entry, restored by the reset button alongside _rotateOriginalPositions
 let currentStlName    = 'model'; // base filename of the loaded STL (no extension)
+// Texture names applied to this model so far, in order of first use. Each bake
+// appends its texture; the export filename is model + these + the texture being
+// applied now, e.g. "Model-Wood2-Stone9".
+let _texturesUsed     = [];
+// Once the user picks a resolution, model loads stop overriding it (see
+// handleModelFile / the refine-length slider).
+let _resolutionUserSet = false;
 let currentStlExt     = '.stl';  // source file extension (.stl/.obj/.3mf), for the stats line
 let activeMapEntry    = null;   // { name, texture, imageData, width, height, isCustom? }
 let _lastCustomMap    = null;   // most recent uploaded/imported custom-map entry, kept across preset switches so the thumbnail can re-activate it
@@ -140,11 +147,8 @@ const settings = {
   regularizeSecondPassMul:   1.1,
   // Coplanar Delaunay edge-flip on flat textured faces (fixes sliver-following
   // tear lines). flattenAngleDeg = max dihedral treated as "flat".
-  // flattenGrain: 'even' (Delaunay) | 'downZ' (grain along −Z) | 'levelZ'
-  // (grain across −Z / horizontal).
   flattenSlivers:            true,
   flattenAngleDeg:           1,
-  flattenGrain:              'even',
   // 'flip' = Delaunay edge-flip (reconnect existing verts). 'remesh' =
   // isotropic rebuild of flat faces with a uniform lattice (fixes CAD fan
   // point-distribution that flipping can't).
@@ -403,8 +407,6 @@ const harvestTolRow          = document.getElementById('harvest-tol-row');
 const flattenSliversChk      = document.getElementById('flatten-slivers-chk');
 const flattenAngleInput      = document.getElementById('flatten-angle');
 const flattenAngleRow        = document.getElementById('flatten-angle-row');
-const flattenGrainSelect     = document.getElementById('flatten-grain');
-const flattenGrainRow        = document.getElementById('flatten-grain-row');
 const flattenMethodSelect    = document.getElementById('flatten-method');
 const flattenMethodRow       = document.getElementById('flatten-method-row');
 // Regularize tuning inputs (Advanced panel) → settings keys consumed by
@@ -1588,6 +1590,10 @@ function wireEvents() {
   linkSlider(boundaryFalloffSlider, boundaryFalloffVal, v => { settings.boundaryFalloff = v; _falloffDirty = true; return v.toFixed(1); });
   linkSlider(refineLenSlider, refineLenVal, v => {
     settings.refineLength = v;
+    // The user has chosen a resolution — stop auto-deriving it from the model
+    // diagonal on subsequent model loads, so tuning survives loading a series
+    // of parts (see handleModelFile).
+    _resolutionUserSet = true;
     checkResolutionWarning();
     // Diagnostic from a previous Smart click no longer matches the new value.
     // (applySmartResolution sets values without dispatching `input`, so this
@@ -1647,8 +1653,6 @@ function wireEvents() {
     const on = settings.flattenSlivers;
     if (flattenAngleRow)  flattenAngleRow.classList.toggle('disabled', !on);
     if (flattenMethodRow) flattenMethodRow.classList.toggle('disabled', !on);
-    // Grain only applies to the flip method (remesh has no directional grain).
-    if (flattenGrainRow)  flattenGrainRow.classList.toggle('disabled', !on || settings.flattenMethod === 'remesh');
   };
   if (flattenSliversChk) {
     flattenSliversChk.checked = settings.flattenSlivers;
@@ -1663,12 +1667,6 @@ function wireEvents() {
     flattenAngleInput.addEventListener('input', () => {
       const v = parseFloat(flattenAngleInput.value);
       if (Number.isFinite(v) && v > 0) settings.flattenAngleDeg = v;
-    });
-  }
-  if (flattenGrainSelect) {
-    flattenGrainSelect.value = settings.flattenGrain;
-    flattenGrainSelect.addEventListener('change', () => {
-      settings.flattenGrain = flattenGrainSelect.value;
     });
   }
   if (flattenMethodSelect) {
@@ -1750,39 +1748,13 @@ function wireEvents() {
     clearDiagHighlight();
   });
 
-  // ── Support banner dismiss ──
-  document.getElementById('store-cta-dismiss').addEventListener('click', () => {
-    document.getElementById('store-cta-wrapper').classList.add('store-cta-hidden');
-  });
-
   // ── Export ──
-  const startExport = (format) => {
-    // Start the export immediately — the pipeline runs in the worker, so the
-    // sponsor overlay sits on top of a live progress bar instead of delaying
-    // the work until it's dismissed.
-    handleExport(format);
+  // Local-only build: the support banner and post-export sponsor overlay are
+  // removed, so Export goes straight to the pipeline.
+  exportBtn.addEventListener('click', () => handleExport('stl'));
+  export3mfBtn.addEventListener('click', () => handleExport('3mf'));
 
-    if (sessionStorage.getItem('stlt-no-sponsor') === '1') return;
-    const overlay = document.getElementById('sponsor-overlay');
-    const closeBtn = document.getElementById('sponsor-close');
-    const storeLink = overlay.querySelector('.sponsor-link');
-    overlay.classList.remove('hidden');
-    trapFocus(overlay);
-
-    const dismiss = () => {
-      if (document.getElementById('sponsor-dont-show').checked) {
-        sessionStorage.setItem('stlt-no-sponsor', '1');
-      }
-      overlay.classList.add('hidden');
-    };
-
-    closeBtn.onclick = dismiss;
-    storeLink.onclick = () => setTimeout(dismiss, 150);
-  };
-  exportBtn.addEventListener('click', () => startExport('stl'));
-  export3mfBtn.addEventListener('click', () => startExport('3mf'));
-
-  // ── Advanced / Beta Features panel: collapse toggle + bake action ──
+  // ── Advanced Features panel: collapse toggle + bake action ──
   advancedToggle.addEventListener('click', () => {
     advancedSection.classList.toggle('collapsed');
   });
@@ -3131,6 +3103,7 @@ async function handleModelFile(file) {
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     _geometryWasRegularized = false; // reset when new model loaded
     _displacedFaces = new Set();     // fresh model — nothing baked yet
+    _texturesUsed   = [];            // fresh model — no textures applied yet
     const _extMatch = file.name.match(/\.(stl|obj|3mf)$/i);
     currentStlExt   = _extMatch ? _extMatch[0].toLowerCase() : '';
     checkAmplitudeWarning();
@@ -3250,12 +3223,16 @@ async function handleModelFile(file) {
     // sense whether the user just loaded a thumb-sized part or a 1m piece.
     triLimitWarning.classList.add('hidden');
 
-    // Default edge length = 1/250 of the bounding box diagonal
-    const diag = Math.sqrt(bounds.size.x ** 2 + bounds.size.y ** 2 + bounds.size.z ** 2);
-    const defaultEdge = Math.max(0.05, Math.min(5.0, +(diag / 250).toFixed(2)));
-    settings.refineLength = defaultEdge;
-    refineLenSlider.value = defaultEdge;
-    refineLenVal.value = defaultEdge;
+    // Default edge length = 1/250 of the bounding box diagonal — but only while
+    // the user hasn't chosen a resolution themselves. Re-deriving it on every
+    // load wiped tuning when loading a series of parts for comparison.
+    if (!_resolutionUserSet) {
+      const diag = Math.sqrt(bounds.size.x ** 2 + bounds.size.y ** 2 + bounds.size.z ** 2);
+      const defaultEdge = Math.max(0.05, Math.min(5.0, +(diag / 250).toFixed(2)));
+      settings.refineLength = defaultEdge;
+      refineLenSlider.value = defaultEdge;
+      refineLenVal.value = defaultEdge;
+    }
     checkResolutionWarning();
 
     const triCount = getTriangleCount(currentGeometry);
@@ -3281,6 +3258,31 @@ async function handleModelFile(file) {
 }
 
 // ── Live preview ──────────────────────────────────────────────────────────────
+
+/** Sanitize a map entry's name for use in a filename. */
+function _texFileLabel(entry) {
+  if (!entry) return null;
+  const raw = entry.isCustom ? 'custom' : (entry.name || '');
+  const clean = raw.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9._-]/g, '');
+  return clean || 'texture';
+}
+
+/** Record a texture as applied to the current model (order preserved, deduped). */
+function _noteTextureUsed(entry) {
+  const label = _texFileLabel(entry);
+  if (label && !_texturesUsed.includes(label)) _texturesUsed.push(label);
+}
+
+/**
+ * Export base filename: model name + every texture applied to it, e.g.
+ * "Model-Wood2-Stone9". Includes the texture being applied by this export.
+ */
+function _exportBaseName() {
+  const labels = _texturesUsed.slice();
+  const current = _texFileLabel(activeMapEntry);
+  if (current && !labels.includes(current)) labels.push(current);
+  return [currentStlName || 'model', ...labels].join('-');
+}
 
 function checkAmplitudeWarning() {
   if (!currentBounds) return;
@@ -3487,6 +3489,9 @@ function applySmartResolution() {
   settings.refineLength = result.edge;
   refineLenSlider.value = result.edge;
   refineLenVal.value    = result.edge;
+  // An explicit Smart click counts as the user choosing a resolution, so later
+  // model loads won't overwrite it.
+  _resolutionUserSet = true;
   checkResolutionWarning();
 
   // Set max-tri via the slider's existing input event so settings.maxTriangles
@@ -5051,9 +5056,7 @@ async function handleExport(format = 'stl') {
       if (exportToken !== myToken) return;
 
       const orderedResults = bodyResults.filter(Boolean);
-      const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
-      const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
-      export3MF(orderedResults, `${currentStlName}_${texLabel}_amp${ampLabel}.3mf`);
+      export3MF(orderedResults, `${_exportBaseName()}.3mf`);
 
       for (const r of orderedResults) r.geometry.dispose();
 
@@ -5126,9 +5129,7 @@ async function handleExport(format = 'stl') {
       );
     }
 
-    const texLabel = activeMapEntry.isCustom ? 'custom' : activeMapEntry.name.replace(/\s+/g, '-');
-    const ampLabel = settings.amplitude.toFixed(2).replace('.', 'p');
-    const baseName = `${currentStlName}_${texLabel}_amp${ampLabel}`;
+    const baseName = _exportBaseName();
 
     if (format === '3mf') {
       setProgress(0.97, t('progress.writing3mf'));
@@ -5772,7 +5773,10 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
 
   currentGeometry = geometry;
   currentBounds   = bounds;
-  currentStlName  = `${currentStlName}_baked`;
+  // Record the texture this bake applied so the export filename can list the
+  // textures used. The model name itself is left alone — appending "_baked"
+  // per bake produced names like "model_baked_baked_baked".
+  if (activeMapEntry) _noteTextureUsed(activeMapEntry);
   checkAmplitudeWarning();
 
   geometry = currentGeometry;
@@ -5990,7 +5994,7 @@ const PERSISTED_KEYS = [
   'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
-  'flattenSlivers', 'flattenAngleDeg', 'flattenGrain', 'flattenMethod',
+  'flattenSlivers', 'flattenAngleDeg', 'flattenMethod',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -6081,10 +6085,6 @@ function applySettingsSnapshot(snap) {
   if (snap.flattenAngleDeg != null && flattenAngleInput) {
     settings.flattenAngleDeg = snap.flattenAngleDeg;
     flattenAngleInput.value = snap.flattenAngleDeg;
-  }
-  if (snap.flattenGrain != null && flattenGrainSelect) {
-    settings.flattenGrain = snap.flattenGrain;
-    flattenGrainSelect.value = snap.flattenGrain;
   }
   if (snap.flattenMethod != null && flattenMethodSelect) {
     settings.flattenMethod = snap.flattenMethod;
