@@ -257,6 +257,10 @@ export function cdt2d(pts, segs, inDomain) {
  *   Flat faces re-meshed uniformly; everything else passed through unchanged.
  */
 const LATTICE_FACTOR = 0.7;
+// Backs off the density derived from the input region (see hEquiv below).
+// Larger = coarser. 1.5 → ~1/2.25 the raw count, landing just above the flip
+// path's density rather than ~3× it.
+const DENSITY_TEMPER = 1.5;
 
 export function remeshFlatRegions(geometry, opts = {}) {
   const targetLen    = opts.targetLen ?? 1;
@@ -391,12 +395,16 @@ export function remeshFlatRegions(geometry, opts = {}) {
     const O0=loops[0][0]; const Ox=vx[O0],Oy=vy[O0],Oz=vz[O0];
     const proj=(vid)=>[ (vx[vid]-Ox)*e1x+(vy[vid]-Oy)*e1y+(vz[vid]-Oz)*e1z, (vx[vid]-Ox)*e2x+(vy[vid]-Oy)*e2y+(vz[vid]-Oz)*e2z ];
 
-    const pts2d=[]; const pt3d=[]; const vidToIdx=new Map();
+    // ptW = per-point exclusion weight. Boundary points KEEP their original
+    // weight so a mask falloff gradient that runs into this face survives the
+    // rebuild (hardcoding 0 flattened the gradient and hardened the perimeter
+    // into a visible jagged seam); new interior points are fully textured (0).
+    const pts2d=[]; const pt3d=[]; const ptW=[]; const vidToIdx=new Map();
     const loops2d=[]; const segs=[];
     for(const loop of loops){
       const lp=[]; const idxs=[];
       for(const vid of loop){ let idx=vidToIdx.get(vid);
-        if(idx===undefined){ idx=pts2d.length; vidToIdx.set(vid,idx); const p=proj(vid); pts2d.push(p); pt3d.push([vx[vid],vy[vid],vz[vid]]); }
+        if(idx===undefined){ idx=pts2d.length; vidToIdx.set(vid,idx); const p=proj(vid); pts2d.push(p); pt3d.push([vx[vid],vy[vid],vz[vid]]); ptW.push(ewv?ewv[vid]:0); }
         idxs.push(idx); lp.push(pts2d[idx]); }
       loops2d.push(lp);
       for(let i=0;i<idxs.length;i++) segs.push([idxs[i], idxs[(i+1)%idxs.length]]);
@@ -404,7 +412,28 @@ export function remeshFlatRegions(geometry, opts = {}) {
     const inDom=(x,y)=>pointInLoops(x,y,loops2d);
     let mnx=Infinity,mny=Infinity,mxx=-Infinity,mxy=-Infinity;
     for(const [x,y] of pts2d){ if(x<mnx)mnx=x; if(y<mny)mny=y; if(x>mxx)mxx=x; if(y>mxy)mxy=y; }
-    const h=Math.max(targetLen * LATTICE_FACTOR, 1e-6);
+    // Lattice spacing. Matching the RESOLUTION TARGET alone is not enough:
+    // subdivision is adaptive, so in CAD fan regions it splits far below the
+    // target (each sliver bisected repeatedly), leaving a much denser mesh than
+    // target-sized triangles would give. A lattice at the target therefore
+    // sampled the texture far more coarsely than the flip path (measured ~8×
+    // fewer triangles on real parts) and looked visibly lower-resolution.
+    //
+    // So derive the spacing from this region's ACTUAL input density — the
+    // equivalent lattice spacing for its mean triangle area — and use the
+    // resolution target only as an upper bound. Over-refined fan regions keep
+    // their sample density (same detail, now uniformly oriented); coarse regions
+    // are still refined to the target.
+    let regArea = 0;
+    for (const t of regionTris[r]) regArea += tArea[t];
+    const nReg = regionTris[r].length || 1;
+    // hEquiv = lattice spacing that reproduces this region's input triangle
+    // COUNT. Used raw it overshoots (~3× the flip path's final density, since
+    // flip's regularize pass collapses slivers before its second subdivide), so
+    // DENSITY_TEMPER backs it off to land just above parity with flip — the
+    // density the user judged near-perfect — instead of tripling memory.
+    const hEquiv = Math.sqrt(4 * (regArea / nReg) / Math.sqrt(3)) * DENSITY_TEMPER;
+    const h=Math.max(Math.min(hEquiv, targetLen * LATTICE_FACTOR), 1e-6);
     const rowH=h*Math.sqrt(3)/2; const minGap=0.5*h;
     const distToBoundary=(x,y)=>{ let best=Infinity;
       for(const lp of loops2d){ for(let i=0,j=lp.length-1;i<lp.length;j=i++){
@@ -419,6 +448,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
         const jx=x+(Math.sin(x*12.9+y*78.2)*1e-6), jy=y+(Math.cos(x*39.3+y*11.1)*1e-6);
         pts2d.push([jx,jy]);
         pt3d.push([Ox+jx*e1x+jy*e2x, Oy+jx*e1y+jy*e2y, Oz+jx*e1z+jy*e2z]);
+        ptW.push(0);
       }
     }
 
@@ -474,7 +504,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
         const gx=(pts2d[a][0]+pts2d[b][0]+pts2d[c][0])/3, gy=(pts2d[a][1]+pts2d[b][1]+pts2d[c][1])/3;
         par = locate(gx, gy);
       }
-      pushTri(pt3d[a], pt3d[b], pt3d[c], 0, 0, 0, par);
+      pushTri(pt3d[a], pt3d[b], pt3d[c], ptW[a], ptW[b], ptW[c], par);
     }
     remeshed[r]=1;
   }
@@ -489,9 +519,41 @@ export function remeshFlatRegions(geometry, opts = {}) {
     pushTri(P[0],P[1],P[2],W[0],W[1],W[2], parentIn ? parentIn[t] : 0);
   }
 
+  const nOut = outP.length / 9;
+
+  // ── Restore parent-ordered output ──────────────────────────────────────────
+  // Emission above is grouped by region (remeshed regions first, then
+  // pass-through), which scrambles the input triangle order. The bake then
+  // assigns each body a CONTIGUOUS post-bake range (startTri/triCount from
+  // triToBody), so scrambled order made those ranges span the wrong triangles:
+  // consecutive bakes sliced across body boundaries, producing non-manifold
+  // edges, jagged face perimeters and mixed-up body colours. Parent ids index
+  // the input triangles, which ARE grouped by body, so a stable counting sort by
+  // parent restores body contiguity. Only needed when parents are tracked.
+  let order2 = null;
+  if (parentIn && nOut > 0) {
+    const counts = new Uint32Array(triCount + 1);
+    for (let i = 0; i < nOut; i++) counts[outParent[i]]++;
+    let run = 0;
+    for (let p = 0; p <= triCount; p++) { const c = counts[p]; counts[p] = run; run += c; }
+    order2 = new Uint32Array(nOut);
+    for (let i = 0; i < nOut; i++) order2[counts[outParent[i]]++] = i;
+  }
+
+  const fPos = new Float32Array(nOut * 9);
+  const fNrm = new Float32Array(nOut * 9);
+  const fW   = ewv ? new Float32Array(nOut * 3) : null;
+  const fPar = parentIn ? new Int32Array(nOut) : null;
+  for (let o = 0; o < nOut; o++) {
+    const src = order2 ? order2[o] : o;
+    for (let k = 0; k < 9; k++) { fPos[o*9+k] = outP[src*9+k]; fNrm[o*9+k] = outN[src*9+k]; }
+    if (fW) for (let k = 0; k < 3; k++) fW[o*3+k] = outW[src*3+k];
+    if (fPar) fPar[o] = outParent[src];
+  }
+
   const out=new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(new Float32Array(outP),3));
-  out.setAttribute('normal',   new THREE.BufferAttribute(new Float32Array(outN),3));
-  if(ewv) out.setAttribute('excludeWeight', new THREE.BufferAttribute(new Float32Array(outW),1));
-  return { geometry: out, faceParentId: parentIn ? new Int32Array(outParent) : null };
+  out.setAttribute('position', new THREE.BufferAttribute(fPos,3));
+  out.setAttribute('normal',   new THREE.BufferAttribute(fNrm,3));
+  if(fW) out.setAttribute('excludeWeight', new THREE.BufferAttribute(fW,1));
+  return { geometry: out, faceParentId: fPar };
 }
