@@ -78,6 +78,13 @@ export function countAreaSlivers(geometry) {
 }
 
 export function resolveTJunctions(geometry, opts = {}) {
+  // Optional per-triangle parent ids, carried through the degenerate filter and
+  // the splits below, returned on geometry.userData.faceParentId. Must be built
+  // in lockstep with `faces` — the filter below DROPS degenerate triangles, so
+  // copying the caller's array wholesale would misalign it by however many were
+  // dropped (an off-by-one per dropped needle).
+  const parentIn = opts.faceParentId || null;
+  let parents   = null;
   const Q       = opts.weldQuant ?? 1e4;
   const onTol   = opts.onSegTol  ?? 0.02;
   const maxIters = opts.maxIters ?? 16;
@@ -118,6 +125,7 @@ export function resolveTJunctions(geometry, opts = {}) {
   //      identical geometry and finds nothing left to remove.
   const DEGEN_AREA2 = 1e-18;
   let faces = [], droppedNeedles = 0;
+  if (parentIn) parents = [];
   for (let t = 0; t < nTri; t++) {
     const a = vid[t*3], b = vid[t*3+1], c = vid[t*3+2];
     if (a === b || b === c || a === c) continue;
@@ -126,6 +134,7 @@ export function resolveTJunctions(geometry, opts = {}) {
     const cx = uy*wz - uz*wy, cy = uz*wx - ux*wz, cz = ux*wy - uy*wx;
     if (cx*cx + cy*cy + cz*cz < DEGEN_AREA2) { droppedNeedles++; continue; }
     faces.push([a, b, c]);
+    if (parents) parents.push(parentIn[t]);
   }
 
   const ekey = (a, b) => (a < b ? a * 4294967296 + b : b * 4294967296 + a);
@@ -179,19 +188,26 @@ export function resolveTJunctions(geometry, opts = {}) {
     if (!didSplit) break;
 
     // Apply: replace each split face with a fan from its apex over the split edge.
+    // Split children inherit their parent face's id so callers that track a
+    // face-parent map (bake) survive this pass.
     const next = [];
+    const nextPar = parents ? [] : null;
     for (let fi = 0; fi < faces.length; fi++) {
       const sp = splits.get(fi);
-      if (!sp) { next.push(faces[fi]); continue; }
+      if (!sp) { next.push(faces[fi]); if (nextPar) nextPar.push(parents[fi]); continue; }
       const f = faces[fi], { a, b, mids } = sp;
       const apex = f[0] !== a && f[0] !== b ? f[0] : f[1] !== a && f[1] !== b ? f[1] : f[2];
       // Preserve winding: walk the base in the direction the face traverses it.
       let dirAB = false;
       for (let e = 0; e < 3; e++) if (f[e] === a && f[(e+1)%3] === b) { dirAB = true; break; }
       const seq = dirAB ? [a, ...mids, b] : [b, ...mids.slice().reverse(), a];
-      for (let s = 0; s < seq.length - 1; s++) next.push([seq[s], seq[s+1], apex]);
+      for (let s = 0; s < seq.length - 1; s++) {
+        next.push([seq[s], seq[s+1], apex]);
+        if (nextPar) nextPar.push(parents[fi]);
+      }
     }
     faces = next;
+    if (nextPar) parents = nextPar;
   }
 
   // ── Rebuild non-indexed soup with flat normals ──────────────────────────────
@@ -214,5 +230,6 @@ export function resolveTJunctions(geometry, opts = {}) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(out, 3));
   g.setAttribute('normal',   new THREE.BufferAttribute(nrm, 3));
+  if (parents) g.userData.faceParentId = new Int32Array(parents);
   return g;
 }

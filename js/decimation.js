@@ -103,12 +103,12 @@ function _yieldFrame() {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-export async function decimate(geometry, targetTriangles, onProgress, harvestFlat = true, harvestTol = DEFAULT_HARVEST_TOL) {
+export async function decimate(geometry, targetTriangles, onProgress, harvestFlat = true, harvestTol = DEFAULT_HARVEST_TOL, faceParentId = null) {
   const { positions, faces, vertCount, faceCount } = buildIndexed(geometry);
 
   // Already at/under the target: nothing to decimate. But if harvesting is on we
   // still run — there may be flat faces collapsible for free even below the limit.
-  if (faceCount <= targetTriangles && !harvestFlat) return buildOutput(positions, faces, faceCount);
+  if (faceCount <= targetTriangles && !harvestFlat) return buildOutput(positions, faces, faceCount, faceParentId);
 
   // Per-vertex error quadrics (10 doubles = upper triangle of symmetric 4×4)
   const quadrics = new Float64Array(vertCount * 10);
@@ -260,7 +260,7 @@ export async function decimate(geometry, targetTriangles, onProgress, harvestFla
   }
 
   if (onProgress) onProgress(1);
-  return buildOutput(positions, faces, faceCount);
+  return buildOutput(positions, faces, faceCount, faceParentId);
 }
 
 // ── Linked-list vertex-face incidence ────────────────────────────────────────
@@ -661,16 +661,23 @@ function buildIndexed(geometry) {
 
 // (adjacency helpers replaced by buildLinkedAdj and _unlinkSlot/_moveSlot above)
 
-function buildOutput(positions, faces, faceCount) {
+function buildOutput(positions, faces, faceCount, parentIn = null) {
   let activeFaces = 0;
   for (let f = 0; f < faceCount; f++) {
     if (faces[f * 3] >= 0) activeFaces++;
   }
 
   const posArray = new Float32Array(activeFaces * 9);
+  // Face slots keep their identity through collapses (deleted faces are flagged
+  // with a negative first index), so a surviving face still knows which input
+  // face it descends from. Threading that through lets bake decimate while
+  // keeping the parent map it needs for exclusion / body / adjacency remapping.
+  const parentOut = parentIn ? new Int32Array(activeFaces) : null;
+  let outFace = 0;
   let out = 0;
   for (let f = 0; f < faceCount; f++) {
     if (faces[f * 3] < 0) continue;
+    if (parentOut) parentOut[outFace++] = parentIn[f];
     for (let v = 0; v < 3; v++) {
       const vi = faces[f * 3 + v];
       posArray[out++] = positions[vi * 3];
@@ -699,6 +706,7 @@ function buildOutput(positions, faces, faceCount) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
   geo.setAttribute('normal',   new THREE.BufferAttribute(nrmArray, 3));
+  if (parentOut) geo.userData.faceParentId = parentOut;
   return geo;
 }
 

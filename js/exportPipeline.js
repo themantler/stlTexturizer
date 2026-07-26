@@ -268,13 +268,20 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         // point DISTRIBUTION that edge-flipping can't (fan-radiating vertices).
         // The rebuild changes the triangle set, so bake's parent map is
         // remapped alongside it (else exclusions / painting adjacency break).
+        // Parents are passed in BOTH modes, not just bake. They're valid here
+        // either way (regularize — the only stage that rewrites them — is skipped
+        // for remesh), and passing them makes the remesh sort its output into
+        // parent order identically in both modes. Without that, bake and export
+        // handed decimation different triangle ORDERS and its edge-collapse
+        // sequence diverged, so the two paths produced meshes differing by a
+        // handful of triangles. Only bake keeps the remapped array.
         const res = remeshFlatRegions(subdivided, {
           targetLen: settings.refineLength,
           flatAngleDeg: settings.flattenAngleDeg ?? 1,
-          faceParentId: mode === 'bake' ? faceParentId : null,
+          faceParentId,
         });
         if (res.geometry !== subdivided) { subdivided.dispose(); subdivided = res.geometry; }
-        if (mode === 'bake' && res.faceParentId) faceParentId = res.faceParentId;
+        if (res.faceParentId) faceParentId = res.faceParentId;
       } else {
         // Delaunay edge-flip: reconnect the existing vertices to Delaunay.
         // Triangle count and slot identity are preserved, so faceParentId
@@ -307,10 +314,15 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     const needsDecimation = dispTriCount > settings.maxTriangles;
     finalGeometry = displaced;
 
-    // Decimation runs only in export mode (bake keeps the parent-face map,
-    // which decimate drops): when over the target OR when flat-face harvesting
-    // alone is wanted.
-    const runDecimation = mode === 'export' && (needsDecimation || settings.harvestFlatFaces);
+    // Decimation now runs in BOTH modes: when over the target, or when flat-face
+    // harvesting alone is wanted. It used to be export-only because decimate()
+    // dropped the parent-face map that bake needs — which meant a baked mesh was
+    // raw displaced output while an exported one had been decimated AND
+    // T-junction repaired. Same settings gave visibly different results, so
+    // baking cost quality. decimate() and resolveTJunctions() now thread the
+    // parent map through, so bake runs the identical sequence and produces the
+    // same geometry export would.
+    const runDecimation = needsDecimation || settings.harvestFlatFaces;
     if (runDecimation) {
       onEvent('decimate', 0, { from: dispTriCount, needsDecimation });
       await yieldFrame();
@@ -319,8 +331,12 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         settings.maxTriangles,
         (p) => onEvent('decimate', p, { from: dispTriCount, needsDecimation }),
         settings.harvestFlatFaces,
-        settings.harvestTol
+        settings.harvestTol,
+        mode === 'bake' ? faceParentId : null
       );
+      if (mode === 'bake' && finalGeometry.userData.faceParentId) {
+        faceParentId = finalGeometry.userData.faceParentId;
+      }
       // Free pre-decimation geometry — decimate created a separate copy.
       displaced.dispose();
       displaced = null;
@@ -342,7 +358,11 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
       onEvent('repair', 0);
       await yieldFrame();
       const beforeSlivers = countAreaSlivers(finalGeometry);
-      const repaired = resolveTJunctions(finalGeometry);
+      const repaired = resolveTJunctions(finalGeometry,
+        mode === 'bake' ? { faceParentId } : {});
+      if (mode === 'bake' && repaired.userData.faceParentId) {
+        faceParentId = repaired.userData.faceParentId;
+      }
       finalGeometry.dispose();
       finalGeometry = repaired;
       const after = countEdgeDefects(finalGeometry);

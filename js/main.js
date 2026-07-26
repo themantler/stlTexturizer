@@ -13,7 +13,6 @@ import { subdivide }          from './subdivision.js';
 import { regularizeMesh }     from './regularize.js';
 import { runExportPipeline, snapBottomToFlat } from './exportPipeline.js';
 import { decimate }           from './decimation.js';
-import { resolveTJunctions }  from './meshRepair.js';
 import { set3mfBodies, clear3mfBodies, get3mfBodies, exportSTL, export3MF, build3MFBytes, rotate3mfCenterOffset, get3mfCenterOffset } from './exporter.js';
 import { buildAdjacency, bucketFill,
          buildExclusionOverlayGeo, buildFaceWeights } from './exclusion.js';
@@ -4722,35 +4721,6 @@ function _restoreOriginalPose(positions, normals = null) {
   }
 }
 
-/**
- * Export-time cleanup for geometry that bypassed the pipeline's tail (sliced
- * already-baked bodies). Mirrors what runExportPipeline does for a fresh body:
- * QEM decimation (which also harvests flat faces when enabled) followed by
- * T-junction resolution. Both matter for output quality, not just size —
- * decimation collapses the badly-shaped slivers that carry displacement spikes,
- * and resolveTJunctions welds the hairline cracks that make edges read jagged.
- * Takes ownership of `geo` and returns a new geometry.
- */
-async function _cleanupBakedSlice(geo, budget, onEvent = () => {}) {
-  let g = geo;
-  const tris = g.attributes.position.count / 3;
-  const needs = tris > budget;
-  if (needs || settings.harvestFlatFaces) {
-    onEvent('decimate', 0, { from: tris, needsDecimation: needs });
-    const dec = await decimate(
-      g, budget,
-      (p) => onEvent('decimate', p, { from: tris, needsDecimation: needs }),
-      settings.harvestFlatFaces, settings.harvestTol
-    );
-    g.dispose();
-    g = dec;
-  }
-  onEvent('repair', 0);
-  const repaired = resolveTJunctions(g);
-  g.dispose();
-  return repaired;
-}
-
 async function handleExport(format = 'stl') {
   if (!currentGeometry || !activeMapEntry || isExporting || isBaking) return;
   const myToken = ++exportToken;
@@ -4859,16 +4829,11 @@ async function handleExport(format = 'stl') {
               }
               slicedGeo.setAttribute('normal', new THREE.BufferAttribute(sliceNrm, 3));
             }
-            // Already-baked bodies used to be sliced out and shipped as-is,
-            // skipping BOTH decimation and T-junction repair — the two passes a
-            // fresh body gets inside the pipeline. That's why a baked export
-            // looked worse than a straight export despite carrying far MORE
-            // triangles: the raw displaced mesh keeps every spike sitting on a
-            // badly-shaped sliver, while decimation collapses those slivers
-            // (removing the spikes) and the repair welds T-junction cracks.
-            // Apply the same cleanup here so baked exports match.
-            bodyFinal = await _cleanupBakedSlice(slicedGeo, perBodyBudget, bodyEvent(bi));
-            if (exportToken !== myToken) return;
+            // The bake itself now runs decimation + T-junction repair (the
+            // pipeline applies them in both modes), so this slice is already
+            // final-quality — re-decimating it here would collapse detail a
+            // second time. Ship it as-is.
+            bodyFinal = slicedGeo;
           } else if (alreadyBaked && newPaintedLocal.size > 0) {
             // Baked body with new painted faces — slice existing baked geometry
             // and apply displacement to new faces on top
