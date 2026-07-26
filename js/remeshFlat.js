@@ -258,9 +258,12 @@ export function cdt2d(pts, segs, inDomain) {
  */
 const LATTICE_FACTOR = 0.7;
 // Backs off the density derived from the input region (see hEquiv below).
-// Larger = coarser. 1.5 → ~1/2.25 the raw count, landing just above the flip
-// path's density rather than ~3× it.
-const DENSITY_TEMPER = 1.5;
+// Larger = coarser; 1.0 = reproduce the input region's triangle density exactly.
+// Kept at 1.0: a 1.5 temper was calibrated on a synthetic fan and came out ~2×
+// coarser than the flip path on real CAD parts (356k vs 1.46M triangles), which
+// read as a "smudged"/over-blurred texture. Parity with the mesh the remesh
+// receives is the right target — same sampling density, uniform orientation.
+const DENSITY_TEMPER = 1.0;
 
 export function remeshFlatRegions(geometry, opts = {}) {
   const targetLen    = opts.targetLen ?? 1;
