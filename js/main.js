@@ -5530,7 +5530,6 @@ async function bakeTextures() {
     if (bodies && bodies.length > 1) {
       const exportEntry_bake = getEffectiveMapEntry();
       const perBodyFraction  = 0.08 / bodies.length;
-      const bakeBodyBudget = settings.maxTriangles;
 
       // Build triToBody: for each triangle in the post-bake displaced geometry,
       // which body index does it belong to?
@@ -5617,18 +5616,10 @@ async function bakeTextures() {
         // Skip baking bodies that weren't painted
         if (!shouldBake) continue;
 		
-        // Compute refineLength that keeps this body within bakeBodyBudget
-        const bodyTriCount = bodyGeo.attributes.position.count / 3;
-        const bodyPosAttr  = bodyGeo.attributes.position;
-        let totalEdge = 0;
-        const sampleCount = Math.min(bodyTriCount, 500);
-        for (let t = 0; t < sampleCount; t++) {
-          const b = t * 3;
-          const ax=bodyPosAttr.getX(b),  ay=bodyPosAttr.getY(b),  az=bodyPosAttr.getZ(b);
-          const bx=bodyPosAttr.getX(b+1),by=bodyPosAttr.getY(b+1),bz=bodyPosAttr.getZ(b+1);
-          totalEdge += Math.sqrt((bx-ax)**2+(by-ay)**2+(bz-az)**2);
-        }
-        const avgEdge = totalEdge / sampleCount;
+        // NOTE: an earlier revision sampled edge lengths here to derive a
+        // per-body refineLength capped by a bake budget. It was never applied —
+        // bake uses the user's resolution, same as export — so the sampling was
+        // removed to stop it looking like bake silently coarsens the mesh.
         const origTriCount = (body.origGeometry || body.geometry).attributes.position.count / 3;
         let bodyPaintedLocal = new Set();
 

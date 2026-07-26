@@ -436,7 +436,23 @@ export function remeshFlatRegions(geometry, opts = {}) {
     // DENSITY_TEMPER backs it off to land just above parity with flip — the
     // density the user judged near-perfect — instead of tripling memory.
     const hEquiv = Math.sqrt(4 * (regArea / nReg) / Math.sqrt(3)) * DENSITY_TEMPER;
-    const h=Math.max(Math.min(hEquiv, targetLen * LATTICE_FACTOR), 1e-6);
+    // Also match the PERIMETER's vertex spacing. The region boundary is shared
+    // with neighbouring faces, so its vertices are fixed (they keep the mesh
+    // watertight) and are spaced at whatever subdivision produced. If the
+    // interior lattice is coarser than that, every boundary vertex has to fan
+    // out to a distant interior point — a ring of thin, irregular triangles
+    // right where the texture crosses the face edge, which reads as the jagged
+    // edge transition. Capping h at the mean boundary segment length keeps the
+    // interior at least as fine as the perimeter, so the transition triangles
+    // stay well-shaped (and raises density toward what the resolution implies).
+    let bSum = 0, bN = 0;
+    for (const lp of loops2d) {
+      for (let i = 0, j = lp.length - 1; i < lp.length; j = i++) {
+        bSum += Math.hypot(lp[i][0]-lp[j][0], lp[i][1]-lp[j][1]); bN++;
+      }
+    }
+    const hBoundary = bN ? bSum / bN : Infinity;
+    const h=Math.max(Math.min(hEquiv, hBoundary, targetLen * LATTICE_FACTOR), 1e-6);
     const rowH=h*Math.sqrt(3)/2; const minGap=0.5*h;
     const distToBoundary=(x,y)=>{ let best=Infinity;
       for(const lp of loops2d){ for(let i=0,j=lp.length-1;i<lp.length;j=i++){
