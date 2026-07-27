@@ -66,7 +66,10 @@ let excludedFaces      = new Set();   // triangle indices in currentGeometry
 // keeps the texture it was baked with) while untextured faces of the same
 // body stay selectable without paying for adjacency on millions of displaced
 // triangles.
-let _displacedFaces    = new Set();
+// Per-triangle flag (Uint8Array) over the CURRENT geometry, or null when
+// nothing is baked. Was a Set of triangle indices, which on a multi-million
+// triangle bake cost far more to build and to iterate than a flat byte array.
+let _displacedFaces    = null;
 let triangleAdjacency  = null;        // Array from buildAdjacency
 let triangleCentroids  = null;        // Float32Array from buildAdjacency
 let triangleFaceNormals = null;       // Float32Array — local-space unit face normal per tri
@@ -3115,7 +3118,7 @@ async function handleModelFile(file) {
     currentPoseTrans = originOffset ? originOffset.clone().negate() : new THREE.Vector3(); // mem = orig − centre
     currentStlName  = file.name.replace(/\.(stl|obj|3mf)$/i, '');
     _geometryWasRegularized = false; // reset when new model loaded
-    _displacedFaces = new Set();     // fresh model — nothing baked yet
+    _displacedFaces = null;          // fresh model — nothing baked yet
     _texturesUsed   = [];            // fresh model — no textures applied yet
     const _extMatch = file.name.match(/\.(stl|obj|3mf)$/i);
     currentStlExt   = _extMatch ? _extMatch[0].toLowerCase() : '';
@@ -5505,11 +5508,13 @@ async function bakeTextures() {
     // Track which post-bake triangles carry baked-in displacement (this bake's
     // freshly displaced faces plus earlier ones remapped through the parent
     // map). Painting-tool adjacency skips them — see _displacedFaces.
-    const displacedNow = new Set();
+    let displacedNow = null;
     if (faceParentId) {
+      const prev = _displacedFaces;
+      displacedNow = new Uint8Array(faceParentId.length);
       for (let i = 0; i < faceParentId.length; i++) {
         const parent = faceParentId[i];
-        if (!wasParentExcluded(parent) || _displacedFaces.has(parent)) displacedNow.add(i);
+        if (!wasParentExcluded(parent) || (prev && prev[parent])) displacedNow[i] = 1;
       }
     }
 
@@ -5532,15 +5537,24 @@ async function bakeTextures() {
       }
       triToBody = new Int32Array(postBakeTrisTotal).fill(-1);
       if (faceParentId) {
+        // Was a range-scan over every body for every post-bake triangle
+        // (O(triangles x bodies) — millions x N on a real part). Bodies occupy
+        // contiguous pre-bake ranges, so one lookup table turns it into a single
+        // O(triangles) pass.
+        let preBakeTris = 0;
+        for (const b of bodies) {
+          if (b._origStartTri != null) preBakeTris = Math.max(preBakeTris, b._origStartTri + b._origTriCount);
+        }
+        const origToBody = new Int32Array(preBakeTris).fill(-1);
+        for (let bi = 0; bi < bodies.length; bi++) {
+          const b = bodies[bi];
+          if (b._origStartTri == null) continue;
+          const end = Math.min(preBakeTris, b._origStartTri + b._origTriCount);
+          for (let t = b._origStartTri; t < end; t++) origToBody[t] = bi;
+        }
         for (let i = 0; i < postBakeTrisTotal; i++) {
-          const origTri = faceParentId[i];
-          for (let bi = 0; bi < bodies.length; bi++) {
-            const b = bodies[bi];
-            if (b.startTri != null && origTri >= b.startTri && origTri < b.startTri + b.triCount) {
-              triToBody[i] = bi;
-              break;
-            }
-          }
+          const p = faceParentId[i];
+          triToBody[i] = (p >= 0 && p < preBakeTris) ? origToBody[p] : -1;
         }
       }
 		
@@ -5553,12 +5567,18 @@ async function bakeTextures() {
         const bi = triToBody[i];
         if (bi >= 0) postBakeCount[bi]++;
       }
-      // Log triToBody distribution
-      const triToBodyCount = new Array(bodies.length).fill(0);
-      for (let i = 0; i < postBakeTrisTotal; i++) {
-        const bi = triToBody[i];
-        if (bi >= 0) triToBodyCount[bi]++;
+      // Which bodies received paint — resolved in ONE pass. Each body used to
+      // scan the whole post-bake triangle list itself, so an unpainted body
+      // walked millions of triangles before concluding "no".
+      const bodyPaintedFlag = new Uint8Array(bodies.length);
+      if (excludedFaces.size > 0 && faceParentId) {
+        for (let i = 0; i < postBakeTrisTotal; i++) {
+          const bi = triToBody[i];
+          if (bi < 0 || bodyPaintedFlag[bi]) continue;
+          if (excludedFaces.has(faceParentId[i])) bodyPaintedFlag[bi] = 1;
+        }
       }
+
       let runningPostBake = 0;
       for (let bi = 0; bi < bodies.length; bi++) {
         bodies[bi].startTri = runningPostBake;
@@ -5577,26 +5597,7 @@ async function bakeTextures() {
         // Check if this body had any painted faces in the merged excludedFaces,
         // using original startTri before we updated it above.
         // We already updated startTri, so use triToBody instead.
-        let bodyWasPainted = false;
-        if (excludedFaces.size > 0 && faceParentId) {
-          // Check if any excluded (painted) merged face maps to this body
-          // via the original faceParentId → original body range.
-          // Since we've already updated startTri, we need the original ranges.
-          // Use triToBody on the excluded faces.
-          // excludedFaces contains indices into currentGeometry (pre-bake).
-          // We need to check if any pre-bake triangle belongs to this body.
-          // The original startTri was already updated, so check body index directly.
-          // Actually excludedFaces are pre-bake indices — check original body ranges.
-          // Store original ranges before the update above... we didn't.
-          // Fall back: check if any post-bake triangle maps to this body AND
-          // its pre-bake parent was in excludedFaces.
-          for (let i = 0; i < postBakeTrisTotal; i++) {
-            if (triToBody[i] === bi && faceParentId && excludedFaces.has(faceParentId[i])) {
-              bodyWasPainted = true;
-              break;
-            }
-          }
-        }
+        const bodyWasPainted = bodyPaintedFlag[bi] === 1;
         // Set wasPainted when painted, never reset to false on re-bake
         const previouslyBaked = !!body.wasPainted;
         if (bodyWasPainted) body.wasPainted = true;
@@ -5867,11 +5868,10 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
 
   // Mark which merged triangles to include in adjacency.
   let includeTri = null;
-  if (_displacedFaces && _displacedFaces.size > 0) {
+  if (_displacedFaces && _displacedFaces.length > 0) {
     includeTri = new Uint8Array(postBakeTriCount).fill(1);
-    for (const i of _displacedFaces) {
-      if (i >= 0 && i < postBakeTriCount) includeTri[i] = 0;
-    }
+    const n = Math.min(postBakeTriCount, _displacedFaces.length);
+    for (let i = 0; i < n; i++) if (_displacedFaces[i]) includeTri[i] = 0;
   } else if (bodies && bodies.length > 1) {
     // No per-face map (e.g. legacy project) — fall back to skipping whole
     // painted/displaced bodies like before.
