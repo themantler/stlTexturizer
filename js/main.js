@@ -6003,6 +6003,12 @@ const PERSISTED_KEYS = [
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
   'flattenSlivers', 'flattenAngleDeg', 'flattenMethod', 'maskEdgeWall',
+  // Fixed world texture scale. These were previously only in PRESET_KEYS, so
+  // they never reached the session autosave or a .bumpmesh project — the toggle
+  // silently reverted to off on restart and UVs went back to being normalized by
+  // each model's own bounding box, which looked like "fixed scale ignores the
+  // setting and rescales per model".
+  'fixedWorldTextureScale', 'referenceExtentMm',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -6093,6 +6099,20 @@ function applySettingsSnapshot(snap) {
   if (snap.flattenAngleDeg != null && flattenAngleInput) {
     settings.flattenAngleDeg = snap.flattenAngleDeg;
     flattenAngleInput.value = snap.flattenAngleDeg;
+  }
+  // Fixed world texture scale — restore value AND sync its UI (the row is
+  // hidden unless the toggle is on).
+  if (snap.fixedWorldTextureScale != null && fixedWorldTextureToggle) {
+    settings.fixedWorldTextureScale = snap.fixedWorldTextureScale;
+    fixedWorldTextureToggle.checked = snap.fixedWorldTextureScale;
+    refreshReferenceExtentUi();
+  }
+  if (snap.referenceExtentMm != null && referenceExtentMmVal) {
+    const v = Number(snap.referenceExtentMm);
+    if (Number.isFinite(v) && v > 0) {
+      settings.referenceExtentMm = v;
+      referenceExtentMmVal.value = v;
+    }
   }
   if (snap.maskEdgeWall != null && maskEdgeWallChk) {
     settings.maskEdgeWall = snap.maskEdgeWall;
