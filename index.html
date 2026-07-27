@@ -71,7 +71,7 @@
       <span class="project-io-gap" aria-hidden="true"></span>
 
       <!-- Bake -->
-      <div id="bake-progress" class="export-progress header-progress hidden">
+      <div id="bake-progress" class="export-progress header-progress hidden" style="display:none">
         <div class="export-progress-track">
           <div id="bake-progress-bar" class="export-progress-bar"></div>
           <span id="bake-progress-pct" class="export-progress-pct"></span>
@@ -87,12 +87,12 @@
       <span class="project-io-gap" aria-hidden="true"></span>
 
       <!-- Export -->
-      <div id="export-progress" class="export-progress header-progress hidden">
+      <div id="export-progress" class="export-progress header-progress">
         <div class="export-progress-track">
           <div id="export-progress-bar" class="export-progress-bar"></div>
           <span id="export-progress-pct" class="export-progress-pct"></span>
         </div>
-        <span id="export-progress-label" data-i18n="progress.processing">Processing…</span>
+        <span id="export-progress-label" class="export-progress-label">Ready</span>
       </div>
       <button id="export-btn" class="place-on-face-btn" disabled
               title="Export as STL">
@@ -247,6 +247,7 @@
             <option value="">— select preset —</option>
           </select>
           <button id="preset-load-btn" class="upload-btn">Load</button>
+          <button id="preset-update-btn" class="upload-btn" title="Overwrite the selected preset with the current settings.">Update</button>
           <button id="preset-delete-btn" class="upload-btn">Delete</button>
         </div>
       </section>

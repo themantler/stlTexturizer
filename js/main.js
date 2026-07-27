@@ -191,6 +191,7 @@ const presetSelect     = document.getElementById('preset-select');
 const presetSaveBtn    = document.getElementById('preset-save-btn');
 const presetLoadBtn    = document.getElementById('preset-load-btn');
 const presetDeleteBtn  = document.getElementById('preset-delete-btn');
+const presetUpdateBtn  = document.getElementById('preset-update-btn');
 const textureGroupTabs = document.getElementById('texture-group-tabs');
 
 // ── Canvas filter support (Safari / iOS WebView don't support ctx.filter) ────
@@ -5391,10 +5392,10 @@ function setProgress(fraction, label) {
 // exportPipeline.js (snapBottomToFlat) so it runs inside the worker.
 
 function setBakeProgress(fraction, label) {
-  const pct = Math.round(fraction * 100);
-  bakeProgBar.style.width = `${pct}%`;
-  bakeProgPct.textContent = `${pct}%`;
-  bakeProgLbl.textContent = label;
+  // Bake reports into the SAME permanent tracker as export. Two separate bars in
+  // the header meant whichever one was idle was dead space, and the active one
+  // was easy to miss; one wide always-present readout is easier to follow.
+  setProgress(fraction, label);
 }
 
 // ── Bake Textures (beta) ─────────────────────────────────────────────────────
@@ -6224,20 +6225,13 @@ function _populatePresetDropdown(presets, selectName = null) {
   if (selectName) presetSelect.value = selectName;
 }
 
-// Extend PERSISTED_KEYS with regularize settings for presets
-const PRESET_KEYS = [
-  ...PERSISTED_KEYS,
-  'regularizeEnabled',
-  'regularizeAspectThreshold',
-  'regularizeSlack',
-  'regularizeAggressiveSlack',
-  'regularizeExtremeAspect',
-  'regularizeNormalDeg',
-  'regularizeAggressiveNormalDeg',
-  'regularizeSecondPassMul',
-  'fixedWorldTextureScale',
-  'referenceExtentMm',
-];
+// Presets store exactly the persisted setting set — the regularize tunings,
+// flatten method, mask-edge wall and fixed-world-scale keys all live in
+// PERSISTED_KEYS now, so listing them again here only risked the two lists
+// drifting apart. `regularizeEnabled` is deliberately NOT stored: it has no UI
+// any more (regularization is always on, gated by the pipeline), so a preset
+// saved with it false would silently disable regularization with no way back.
+const PRESET_KEYS = [...PERSISTED_KEYS];
 
 function _capturePresetSnapshot() {
   const snap = {};
@@ -6288,15 +6282,52 @@ presetLoadBtn.addEventListener('click', () => {
   updatePreview();
 });
 
+// Delete uses a two-click inline confirm rather than window.confirm(). The
+// native dialog blocks the renderer and, in Electron, routinely left the preset
+// <select> unresponsive afterwards until you clicked elsewhere — which read as
+// "can't pick a preset after deleting one".
+let _presetDelArmed = null;
+let _presetDelTimer = null;
+function _resetPresetDelete() {
+  clearTimeout(_presetDelTimer);
+  _presetDelArmed = null;
+  presetDeleteBtn.textContent = 'Delete';
+  presetDeleteBtn.classList.remove('active');
+}
 presetDeleteBtn.addEventListener('click', () => {
   const name = presetSelect.value;
   if (!name) return;
-  if (!confirm(`Delete preset "${name}"?`)) return;
+  if (_presetDelArmed !== name) {
+    _presetDelArmed = name;
+    presetDeleteBtn.textContent = 'Confirm?';
+    presetDeleteBtn.classList.add('active');
+    clearTimeout(_presetDelTimer);
+    _presetDelTimer = setTimeout(_resetPresetDelete, 4000);
+    return;
+  }
+  _resetPresetDelete();
   const presets = _loadPresetsFromStorage();
   delete presets[name];
   _savePresetsToStorage(presets);
   _populatePresetDropdown(presets);
 });
+// Changing the selection cancels a pending delete confirm.
+presetSelect.addEventListener('change', () => { if (_presetDelArmed) _resetPresetDelete(); });
+
+// 'Update' overwrites the selected preset with the current settings, so tweaking
+// a preset no longer means deleting it and re-saving from scratch.
+if (presetUpdateBtn) {
+  presetUpdateBtn.addEventListener('click', () => {
+    const name = presetSelect.value;
+    if (!name) return;
+    const presets = _loadPresetsFromStorage();
+    presets[name] = _capturePresetSnapshot();
+    _savePresetsToStorage(presets);
+    _populatePresetDropdown(presets, name);
+    presetUpdateBtn.textContent = 'Updated';
+    setTimeout(() => { presetUpdateBtn.textContent = 'Update'; }, 1200);
+  });
+}
 
 function _restoreSessionSettings() {
   let raw;

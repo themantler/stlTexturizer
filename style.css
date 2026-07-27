@@ -1956,3 +1956,24 @@ input[type="number"].val:focus { outline: none; border-color: var(--accent); }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* ── Permanent process tracker ───────────────────────────────────────────────
+   The status readout used to be ~110px wide with 0.65rem text and appeared only
+   while an operation ran, so fast stages ("Reducing slivers", "Displacing
+   vertices") flashed past unreadably. It is now double-width, larger, and a
+   fixed part of the header — overriding .export-progress.hidden so it stays put
+   between runs. Bake and export both report into this one element. */
+.header-progress {
+  max-width: 240px;
+  min-width: 240px;
+  font-size: 13px;
+}
+.header-progress.hidden { display: inline-flex; }
+.header-progress .export-progress-track { height: 13px; }
+/* Explicit px, not rem: the app's root font is 13px, so rem values here came out
+   SMALLER than intended (0.78rem ≈ 10px) and the stage text stayed hard to read. */
+.header-progress .export-progress-label,
+.header-progress [data-i18n="progress.processing"] {
+  font-size: 13px;
+  font-weight: 500;
+}
+.header-progress .export-progress-pct { font-size: 11px; }
