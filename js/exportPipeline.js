@@ -376,6 +376,18 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
       if (shouldAbort()) return null;
     }
 
+    // Stage trace: bake and export must run the same sequence and land on the
+    // same counts. Logging both makes any divergence directly comparable instead
+    // of inferred from the final number.
+    console.log(
+      `%c[stlTexturizer] pipeline (${mode}): sub1=${subTriCount.toLocaleString()}` +
+      ` disp=${dispTriCount.toLocaleString()}` +
+      ` ${runDecimation ? `decim=${(finalGeometry.attributes.position.count/3).toLocaleString()}` : 'decim=skipped'}` +
+      ` budget=${settings.maxTriangles.toLocaleString()} harvest=${settings.harvestFlatFaces ? 'on' : 'off'}` +
+      ` regularize=${_doRegularize ? 'on' : 'off'} flatten=${settings.flattenSlivers !== false ? (settings.flattenMethod || 'flip') : 'off'}`,
+      'color:#08a'
+    );
+
     done = true;
     return {
       positions: finalGeometry.attributes.position.array,

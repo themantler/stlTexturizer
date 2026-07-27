@@ -5430,16 +5430,27 @@ async function bakeTextures() {
     // wasted work).
     const exportEntry = getEffectiveMapEntry();
     const bakeBodies = get3mfBodies();
-    const bakeRegularize = settings.regularizeEnabled
-      && !_geometryWasRegularized
-      && !(bakeBodies && bakeBodies.length > 1);
+    // Regularization must follow the SAME rule as export or the two produce
+    // different meshes. Export regularizes each body it textures, so the merged
+    // bake does too — the earlier multi-body exclusion here saved time but made
+    // bake structurally different from export, which is exactly what the export
+    // slices later. The remesh skip still applies (it lives in the pipeline) and
+    // _geometryWasRegularized still stops a second pass over a dense baked mesh.
+    const bakeRegularize = settings.regularizeEnabled && !_geometryWasRegularized;
+    // Triangle budget must also match. Export decimates PER BODY against
+    // settings.maxTriangles (perBodyBudget), so an N-body model effectively gets
+    // N x that budget; the merged bake sees one mesh and would decimate the whole
+    // model to a single budget — roughly 1/N the triangles, which is the bake-vs-
+    // export gap. Scale it so both paths allow the same total.
+    const bakeBodyCount = (bakeBodies && bakeBodies.length > 1) ? bakeBodies.length : 1;
+    const bakeMaxTris = settings.maxTriangles * bakeBodyCount;
     const result = await runPipeline({
       positions: currentGeometry.attributes.position.array,
       faceWeights,
       imageData: exportEntry.imageData,
       imgWidth: exportEntry.width,
       imgHeight: exportEntry.height,
-      settings: { ...settings, regularizeEnabled: bakeRegularize },
+      settings: { ...settings, regularizeEnabled: bakeRegularize, maxTriangles: bakeMaxTris },
       bounds: currentBounds,
       regularizeOpts: _regularizeOpts(),
       mode: 'bake',
