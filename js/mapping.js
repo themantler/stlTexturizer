@@ -11,6 +11,7 @@ export const MODE_CYLINDRICAL = 3;
 export const MODE_SPHERICAL   = 4;
 export const MODE_TRIPLANAR   = 5;
 export const MODE_CUBIC       = 6;
+export const MODE_FACE_ALIGNED = 7;
 
 const TWO_PI = Math.PI * 2;
 
@@ -145,6 +146,38 @@ export function computeUV(pos, normal, mode, settings, bounds) {
     case MODE_PLANAR_YZ: {
       u = (pos.y - min.y) / md;
       v = (pos.z - min.z) / md;
+      break;
+    }
+
+    case MODE_FACE_ALIGNED: {
+      // Project each face along ITS OWN normal, so a flat face lands at true
+      // 1:1 scale no matter how it is angled in space. The axis-aligned modes
+      // (planar / triplanar / cubic) foreshorten any face that is not square to
+      // the projection axis — a 60 deg face reads ~4x larger, an 80 deg face
+      // ~11x — which is why a fixed world scale still looked face-dependent.
+      //
+      // In-plane basis: world +Z projected onto the face gives "up" (v), so a
+      // directional texture runs uphill consistently across angled faces; the
+      // horizontal in-plane axis gives u. Faces that are nearly horizontal have
+      // no in-plane +Z, so they fall back to +Y.
+      const nx = normal.x, ny = normal.y, nz = normal.z;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      const ux = nx / nl, uy = ny / nl, uz = nz / nl;
+      let upx = 0, upy = 0, upz = 1;
+      if (Math.abs(uz) > 0.99) { upx = 0; upy = 1; upz = 0; }
+      const d = upx * ux + upy * uy + upz * uz;
+      let e2x = upx - ux * d, e2y = upy - uy * d, e2z = upz - uz * d;
+      const e2l = Math.hypot(e2x, e2y, e2z) || 1;
+      e2x /= e2l; e2y /= e2l; e2z /= e2l;
+      // e1 = e2 x n  (the other in-plane axis)
+      const e1x = e2y * uz - e2z * uy;
+      const e1y = e2z * ux - e2x * uz;
+      const e1z = e2x * uy - e2y * ux;
+      // Anchor at a fixed world point so the texture does not swim between
+      // faces or move when the model changes size.
+      const rx = pos.x - min.x, ry = pos.y - min.y, rz = pos.z - min.z;
+      u = (rx * e1x + ry * e1y + rz * e1z) / md;
+      v = (rx * e2x + ry * e2y + rz * e2z) / md;
       break;
     }
 

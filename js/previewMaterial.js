@@ -153,6 +153,18 @@ const sharedGLSL = /* glsl */`
       float hCap  = sampleMap(vec2(cylRel2.x / C + 0.5, cylRel2.y / C + 0.5));
       return mix(hSide, hCap, capW);
 
+    } else if (mappingMode == 7) {
+      // Face-aligned: project along the face's own normal so angled faces get
+      // true 1:1 scale (axis-aligned modes foreshorten them). In-plane basis is
+      // world +Z projected onto the face for "up", falling back to +Y on
+      // near-horizontal faces where +Z has no in-plane direction.
+      vec3 fn = normalize(projN);
+      vec3 up = abs(fn.z) > 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+      vec3 e2 = normalize(up - fn * dot(fn, up));
+      vec3 e1 = cross(e2, fn);
+      vec3 rel2 = pos - boundsMin;
+      return sampleMap(vec2(dot(rel2, e1) / md, dot(rel2, e2) / md));
+
     } else if (mappingMode == 4) {
       float r     = length(rel);
       float phi   = acos(clamp(rel.z / max(r, 1e-4), -1.0, 1.0));
