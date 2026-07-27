@@ -5522,7 +5522,6 @@ async function bakeTextures() {
     const bodies = get3mfBodies();
     let triToBody = null;
     if (bodies && bodies.length > 1) {
-      const exportEntry_bake = getEffectiveMapEntry();
       const perBodyFraction  = 0.08 / bodies.length;
 
       // Build triToBody: for each triangle in the post-bake displaced geometry,
@@ -5635,89 +5634,38 @@ async function bakeTextures() {
         // Build face weights: exclude everything NOT in the painted set.
         // If nothing painted on this body, skip it (handled by wasPainted check).
         const bodyExcluded = body.excludedFaces || new Set();
-        let bodyFaceWeights = null;
-        if (bodyPaintedLocal.size > 0) {
-          // Use selection mode (include only painted faces)
-          bodyFaceWeights = buildCombinedFaceWeights(bodyGeo, bodyPaintedLocal, true, {
-            ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
-          });
-        } else if (bodyExcluded.size > 0) {
-          bodyFaceWeights = buildCombinedFaceWeights(bodyGeo, bodyExcluded, false, {
-            ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
-          });
-        }
-        let bodyDisplaced = null, bodyGeoForBake = null;
+        // NOTE: this used to also build per-body face weights via
+        // buildCombinedFaceWeights for the per-body pipeline run. With that run
+        // gone the weights had no consumer, so the per-body pass over each
+        // body's triangles is dropped too.
+        // Bookkeeping only. This loop used to re-run the ENTIRE texturing
+        // pipeline per body (subdivide -> regularize -> displace -> decimate ->
+        // repair) starting from body.origGeometry, duplicating work the merged
+        // bake above had already done on the same surfaces — the model was
+        // textured twice on every bake. Its only output, body.geometry, is read
+        // solely by project save: on export a painted body takes the slice path
+        // out of currentGeometry, and an unpainted body was skipped here anyway.
+        // Project save now slices currentGeometry too (see _sliceBodyFromCurrent),
+        // so the regenerated copy had no remaining consumer.
         try {
-          // Clone and rotate body geometry into the same space as currentGeometry
-          // so applyDisplacement UV mapping matches the viewport preview
-          bodyGeoForBake = bodyGeo;
-          const _isRotated = _cumulativeRotation &&
-            Math.abs(_cumulativeRotation.x) + Math.abs(_cumulativeRotation.y) +
-            Math.abs(_cumulativeRotation.z) > 1e-6;
-          if (_isRotated) {
-            bodyGeoForBake = bodyGeo.clone();
-            const _pa = bodyGeoForBake.attributes.position.array;
-            const _rv = new THREE.Vector3();
-            for (let i = 0; i < _pa.length; i += 3) {
-              _rv.set(_pa[i], _pa[i+1], _pa[i+2]).applyQuaternion(_cumulativeRotation);
-              _pa[i] = _rv.x; _pa[i+1] = _rv.y; _pa[i+2] = _rv.z;
-            }
-            bodyGeoForBake.attributes.position.needsUpdate = true;
-            bodyGeoForBake.computeVertexNormals();
-          }
-
-          // Bake this body via the shared worker pipeline (subdivide →
-          // regularize → displace → bottom snaps; bake mode keeps the
-          // face-parent map and skips decimation).
-          const bodyBakeResult = await runPipeline({
-            positions: bodyGeoForBake.attributes.position.array,
-            faceWeights: bodyFaceWeights,
-            imageData: exportEntry_bake.imageData,
-            imgWidth: exportEntry_bake.width,
-            imgHeight: exportEntry_bake.height,
-            settings,
-            bounds: currentBounds,
-            regularizeOpts: _regularizeOpts(),
-            mode: 'bake',
-          }, () => {}, () => false);
-          if (!bodyBakeResult) throw new Error('bake pipeline aborted');
           if (settings.regularizeEnabled) body.wasRegularized = true;
-          const bodyFaceParentId = bodyBakeResult.faceParentId;
-          bodyDisplaced = new THREE.BufferGeometry();
-          bodyDisplaced.setAttribute('position', new THREE.BufferAttribute(bodyBakeResult.positions, 3));
-          if (bodyBakeResult.normals) bodyDisplaced.setAttribute('normal', new THREE.BufferAttribute(bodyBakeResult.normals, 3));
 
-          if (bakeMaskChk.checked && bodyFaceParentId) {
+          // Painted faces accumulate in body.geometry's index space, which stays
+          // the original mesh now that we no longer replace it — the same space
+          // bodyPaintedLocal is already expressed in.
+          if (bakeMaskChk.checked) {
             const newBodyExcluded = new Set(bodyExcluded);
-            const wasBodyParentExcluded = bodyFaceWeights
-              ? (parentIdx) => bodyFaceWeights[parentIdx * 3] > 0.99
-              : () => false;
-            for (let i = 0; i < bodyFaceParentId.length; i++) {
-              if (!wasBodyParentExcluded(bodyFaceParentId[i])) {
-                newBodyExcluded.add(i);
-              }
-            }
+            for (const li of bodyPaintedLocal) newBodyExcluded.add(li);
             body.excludedFaces = newBodyExcluded;
           }
 
-          if (bodyDisplaced) {
-            body.geometry.dispose();
-            body.geometry = bodyDisplaced;
-            body.hasBeenDisplaced = true;
-            body.lastPaintedLocal = new Set(bodyPaintedLocal);
-            // Also store the merged indices that triggered this bake
-            body.lastPaintedMerged = new Set(
-              [...excludedFaces].filter(idx => idx < triToBody.length && triToBody[idx] === bi)
-            );
-            bodyDisplaced = null;
-          }
-
+          body.hasBeenDisplaced = true;
+          body.lastPaintedLocal = new Set(bodyPaintedLocal);
+          body.lastPaintedMerged = new Set(
+            [...excludedFaces].filter(idx => idx < triToBody.length && triToBody[idx] === bi)
+          );
         } catch (bodyErr) {
-          console.error(`Per-body bake failed for body ${bi} (${body.name}):`, bodyErr);
-        } finally {
-          if (bodyGeoForBake && bodyGeoForBake !== bodyGeo) bodyGeoForBake.dispose();
-          if (bodyDisplaced)  bodyDisplaced.dispose();
-          if (window.gc) window.gc();
+          console.error(`Per-body bake bookkeeping failed for body ${bi} (${body.name}):`, bodyErr);
         }
 
         setBakeProgress(0.91 + (bi + 1) * perBodyFraction, t('progress.finalizing'));
@@ -6484,8 +6432,16 @@ exportGoBtn.addEventListener('click', async () => {
       if (bodiesForSave && bodiesForSave.length > 1) {
         // Multi-body project: bundle the bodies as a raw 3MF plus the per-body
         // paint/exclusion state so re-import restores the full working session.
+        // A painted body's textured geometry is sliced out of the finished
+        // merged mesh rather than kept as a separately re-baked copy. That copy
+        // used to be rebuilt on every bake (see the per-body loop) and could
+        // even disagree with the export, because it restarted from the original
+        // mesh each time and only re-applied the most recent painted set.
+        // Slicing is a memory copy of contiguous ranges — milliseconds — and is
+        // exactly what the export writes.
         const modelResults = bodiesForSave.map(b => ({
-          geometry: b.wasPainted ? b.geometry : (b.origGeometry || b.geometry),
+          geometry: (b.wasPainted ? _sliceBodyFromCurrent(b) : null)
+                    || b.origGeometry || b.geometry,
           name: b.name,
           matrix: b.matrix,
         }));
@@ -6520,6 +6476,36 @@ exportGoBtn.addEventListener('click', async () => {
     alert(t('alerts.exportFailed', { msg: err.message }));
   }
 });
+
+/**
+ * Slice one body's triangles out of the current (post-bake) merged geometry,
+ * using the post-bake startTri/triCount ranges the bake maintains. Returns null
+ * when the ranges are unavailable, so callers can fall back to stored geometry.
+ */
+function _sliceBodyFromCurrent(body) {
+  if (!currentGeometry || body.startTri == null || !body.triCount) return null;
+  const srcPos = currentGeometry.attributes.position.array;
+  const total  = (srcPos.length / 9) | 0;
+  if (body.startTri + body.triCount > total) return null;
+  const srcNrm = currentGeometry.attributes.normal
+    ? currentGeometry.attributes.normal.array : null;
+  const pos = new Float32Array(body.triCount * 9);
+  for (let t = 0; t < body.triCount; t++) {
+    const src = (body.startTri + t) * 9;
+    pos.set(srcPos.subarray(src, src + 9), t * 9);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  if (srcNrm) {
+    const nrm = new Float32Array(body.triCount * 9);
+    for (let t = 0; t < body.triCount; t++) {
+      const src = (body.startTri + t) * 9;
+      nrm.set(srcNrm.subarray(src, src + 9), t * 9);
+    }
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  }
+  return geo;
+}
 
 /** Pack a BufferGeometry into binary-STL bytes (80-byte header, uint32 count, 50 bytes per triangle). With restorePose, vertices/normals are mapped back to the model's original file pose (see _restoreOriginalPose) without mutating the geometry. */
 function _geometryToBinarySTL(geo, restorePose = false) {
