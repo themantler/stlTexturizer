@@ -306,6 +306,17 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     );
     if (shouldAbort()) return null;
 
+    // Mask-edge walls append triangles, so the bake's face-parent map has to
+    // grow with them — each wall triangle inherits the textured face it rises
+    // from. Without this the map would no longer be 1:1 with the geometry.
+    if (mode === 'bake' && faceParentId && displaced.userData.wallSrcTri) {
+      const w = displaced.userData.wallSrcTri;
+      const ext = new Int32Array(faceParentId.length + w.length);
+      ext.set(faceParentId, 0);
+      for (let i = 0; i < w.length; i++) ext[faceParentId.length + i] = faceParentId[w[i]];
+      faceParentId = ext;
+    }
+
     // Free subdivided geometry — displacement created a separate copy.
     subdivided.dispose();
     subdivided = null;

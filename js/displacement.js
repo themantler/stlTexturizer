@@ -527,7 +527,14 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // Pin included-face vertices that share a position with an excluded face.
     // This seals the open crack at the mask boundary so the mesh stays watertight
     // and the decimator cannot collapse the excluded patch to zero faces.
-    const isSealedBoundary = !isFaceExcluded && excludedPos && excludedPos[vid] === 1;
+    // Normally an included-face vertex that shares a position with an excluded
+    // face is pinned to zero so the mask boundary stays sealed — but that makes
+    // the texture RAMP down to nothing across the last row of triangles. With
+    // maskEdgeWall on we deliberately let it displace to full height, opening a
+    // clean gap at the boundary that the wall pass below stitches shut with
+    // vertical quads, giving a perpendicular edge instead of a ramp.
+    const isSealedBoundary = !isFaceExcluded && excludedPos && excludedPos[vid] === 1
+                             && !settings.maskEdgeWall;
     const mfTotal = maskedFracTotal[vid];
     const maskedFrac = mfTotal > 0 ? maskedFracMasked[vid] / mfTotal : 0;
     const centeredGrey = settings.symmetricDisplacement ? (grey - 0.5) : grey;
@@ -597,9 +604,82 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     }
   }
 
+  // ── Mask-edge walls ─────────────────────────────────────────────────────────
+  // With maskEdgeWall on, the pin above was lifted so textured faces displaced
+  // to full height while their masked neighbours stayed on the original surface,
+  // leaving an open gap all along the mask boundary. Stitch that gap with
+  // vertical quads: the texture then ends in a perpendicular wall rather than
+  // fading out, and the mesh stays watertight.
+  //
+  // A boundary edge is one whose two triangles disagree about being excluded.
+  // For each we have both heights already: the excluded copy holds the original
+  // surface point, the textured copy holds the displaced point.
+  let wallPos = null, wallSrc = null;
+  if (settings.maskEdgeWall && ewAttr && userExcludedFaces) {
+    // Edge → the textured and excluded corner indices seen on it.
+    const eMap = new Map();
+    for (let t = 0; t < count; t += 3) {
+      const excl = userExcludedFaces[t / 3] === 1;
+      for (let e = 0; e < 3; e++) {
+        const i0 = t + e, i1 = t + (e + 1) % 3;
+        const a = vertexId[i0], b = vertexId[i1];
+        const key = a < b ? a * 4294967296 + b : b * 4294967296 + a;
+        let rec = eMap.get(key);
+        if (!rec) { rec = { tex: -1, exc: -1, ta: -1, tb: -1 }; eMap.set(key, rec); }
+        if (excl) rec.exc = i0;
+        else { rec.tex = i0; rec.ta = i0; rec.tb = i1; }
+      }
+    }
+    const quads = [];
+    const wallSrcTri = [];   // source textured triangle per wall triangle
+    for (const rec of eMap.values()) {
+      if (rec.tex < 0 || rec.exc < 0) continue;      // not a mask boundary
+      // Directed edge as the TEXTURED face traverses it — gives the wall a
+      // winding consistent with that face, so its normal faces outward.
+      const ia = rec.ta, ib = rec.tb;
+      const va = vertexId[ia], vb = vertexId[ib];
+      // Original (masked-side) points, displaced (textured-side) points.
+      const oax = posAttr.getX(ia), oay = posAttr.getY(ia), oaz = posAttr.getZ(ia);
+      const obx = posAttr.getX(ib), oby = posAttr.getY(ib), obz = posAttr.getZ(ib);
+      const dax = newPos[ia*3], day = newPos[ia*3+1], daz = newPos[ia*3+2];
+      const dbx = newPos[ib*3], dby = newPos[ib*3+1], dbz = newPos[ib*3+2];
+      // Skip where there is no actual step (nothing to stitch).
+      const sa = Math.abs(dax-oax) + Math.abs(day-oay) + Math.abs(daz-oaz);
+      const sb = Math.abs(dbx-obx) + Math.abs(dby-oby) + Math.abs(dbz-obz);
+      if (sa + sb < 1e-9) continue;
+      quads.push(oax,oay,oaz, obx,oby,obz, dbx,dby,dbz,
+                 oax,oay,oaz, dbx,dby,dbz, dax,day,daz);
+      // Both wall triangles inherit the textured face they rise from, so a
+      // bake's face-parent map can be extended to cover them.
+      const srcTri = (ia / 3) | 0;
+      wallSrcTri.push(srcTri, srcTri);
+    }
+    if (quads.length) { wallPos = new Float32Array(quads); wallSrc = wallSrcTri; }
+  }
+
+  let finalPos = newPos, finalNrm = newNrm;
+  if (wallPos) {
+    finalPos = new Float32Array(newPos.length + wallPos.length);
+    finalPos.set(newPos, 0); finalPos.set(wallPos, newPos.length);
+    finalNrm = new Float32Array(finalPos.length);
+    finalNrm.set(newNrm, 0);
+    // Flat normals for the wall triangles.
+    for (let t = newPos.length; t < finalPos.length; t += 9) {
+      const ax=finalPos[t],   ay=finalPos[t+1], az=finalPos[t+2];
+      const bx=finalPos[t+3], by=finalPos[t+4], bz=finalPos[t+5];
+      const cx=finalPos[t+6], cy=finalPos[t+7], cz=finalPos[t+8];
+      const ux=bx-ax, uy=by-ay, uz=bz-az, vx2=cx-ax, vy2=cy-ay, vz2=cz-az;
+      let nx=uy*vz2-uz*vy2, ny=uz*vx2-ux*vz2, nz=ux*vy2-uy*vx2;
+      const l=Math.hypot(nx,ny,nz)||1; nx/=l; ny/=l; nz/=l;
+      for (let v=0; v<3; v++) { finalNrm[t+v*3]=nx; finalNrm[t+v*3+1]=ny; finalNrm[t+v*3+2]=nz; }
+    }
+  }
+
   const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
-  out.setAttribute('normal',   new THREE.BufferAttribute(newNrm, 3));
+  out.setAttribute('position', new THREE.BufferAttribute(finalPos, 3));
+  out.setAttribute('normal',   new THREE.BufferAttribute(finalNrm, 3));
+  // Lets the pipeline extend a face-parent map over the appended wall triangles.
+  if (wallSrc) out.userData.wallSrcTri = wallSrc;
   return out;
 }
 

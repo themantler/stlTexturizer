@@ -147,6 +147,9 @@ const settings = {
   regularizeSecondPassMul:   1.1,
   // Coplanar Delaunay edge-flip on flat textured faces (fixes sliver-following
   // tear lines). flattenAngleDeg = max dihedral treated as "flat".
+  // End the texture in a vertical wall at mask boundaries (crisp 90 deg edge)
+  // instead of ramping down to the masked surface.
+  maskEdgeWall:              false,
   flattenSlivers:            true,
   flattenAngleDeg:           1,
   // 'flip' = Delaunay edge-flip (reconnect existing verts). 'remesh' =
@@ -404,6 +407,7 @@ const smoothBottomChk        = document.getElementById('smooth-bottom-chk');
 const harvestFlatChk         = document.getElementById('harvest-flat-chk');
 const harvestTolInput        = document.getElementById('harvest-tol');
 const harvestTolRow          = document.getElementById('harvest-tol-row');
+const maskEdgeWallChk        = document.getElementById('mask-edge-wall-chk');
 const flattenSliversChk      = document.getElementById('flatten-slivers-chk');
 const flattenAngleInput      = document.getElementById('flatten-angle');
 const flattenAngleRow        = document.getElementById('flatten-angle-row');
@@ -1649,6 +1653,14 @@ function wireEvents() {
   }
 
   // Coplanar sliver-flatten toggle + flat-angle threshold.
+  if (maskEdgeWallChk) {
+    maskEdgeWallChk.checked = settings.maskEdgeWall;
+    maskEdgeWallChk.addEventListener('change', () => {
+      settings.maskEdgeWall = maskEdgeWallChk.checked;
+      updatePreview();
+    });
+  }
+
   const _syncFlattenRows = () => {
     const on = settings.flattenSlivers;
     if (flattenAngleRow)  flattenAngleRow.classList.toggle('disabled', !on);
@@ -5990,7 +6002,7 @@ const PERSISTED_KEYS = [
   'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
-  'flattenSlivers', 'flattenAngleDeg', 'flattenMethod',
+  'flattenSlivers', 'flattenAngleDeg', 'flattenMethod', 'maskEdgeWall',
   // Cylindrical-mode controls. cylinderCenterX/Y/radius are nullable —
   // null means "fall back to AABB defaults", which is what fresh loads get.
   'snapSeamlessWrap', 'cylinderCenterX', 'cylinderCenterY', 'cylinderRadius',
@@ -6081,6 +6093,10 @@ function applySettingsSnapshot(snap) {
   if (snap.flattenAngleDeg != null && flattenAngleInput) {
     settings.flattenAngleDeg = snap.flattenAngleDeg;
     flattenAngleInput.value = snap.flattenAngleDeg;
+  }
+  if (snap.maskEdgeWall != null && maskEdgeWallChk) {
+    settings.maskEdgeWall = snap.maskEdgeWall;
+    maskEdgeWallChk.checked = snap.maskEdgeWall;
   }
   if (snap.flattenMethod != null && flattenMethodSelect) {
     settings.flattenMethod = snap.flattenMethod;

@@ -297,6 +297,13 @@
           <input type="range" id="boundary-falloff" min="0" max="10" step="0.1" value="0" />
           <input type="number" class="val" id="boundary-falloff-val" value="0" min="0" max="10" step="0.1" data-wheel-decimals="2" />
         </div>
+        <div class="form-row">
+          <label class="checkbox-label" for="mask-edge-wall-chk"
+            title="End the texture in a vertical wall at masked boundaries instead of fading out. The textured area keeps its full height right up to the border, then drops perpendicular to the surface — a crisp 90 degree edge for embossed panels and inlays. Overrides Smooth Mask at those borders.">
+            <input type="checkbox" id="mask-edge-wall-chk" />
+            <span>Perpendicular edge at mask boundary</span>
+          </label>
+        </div>
 
         <!-- By Angle -->
         <h3 class="panel-subsection-heading" data-i18n="sections.maskAngles" data-i18n-title="tooltips.maskAngles" title="0° = no masking. Surfaces within this angle of horizontal will not be textured.">By Angle ⓘ</h3>
