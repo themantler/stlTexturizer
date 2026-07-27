@@ -116,6 +116,18 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   // Positions that belong to at least one user-excluded face (replaces excludedPosSet).
   const excludedPos = ewAttr ? new Uint8Array(uniqueCount) : null;
 
+  // Dominant (largest-area) incident FACE normal per unique vertex. Face-aligned
+  // mapping builds its projection basis from the normal, so it must use a
+  // face-stable one: the averaged/smoothed normal swings across a sharp edge,
+  // which rotates the basis rapidly there and samples the texture erratically —
+  // the rough seam where two differently-angled faces meet. Picking the dominant
+  // face keeps the basis constant across each face so the ridge becomes a clean
+  // mitred seam. Also matches the shader, which uses its face-stable projN.
+  const domNrmX = new Float64Array(uniqueCount);
+  const domNrmY = new Float64Array(uniqueCount);
+  const domNrmZ = new Float64Array(uniqueCount);
+  const domArea = new Float64Array(uniqueCount);
+
   // Displacement cache: one sample per unique vertex (replaces dispCache Map)
   const dispCacheVal = new Float64Array(uniqueCount);
   const dispCacheSet = new Uint8Array(uniqueCount);
@@ -131,6 +143,17 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // Determine if this face is masked (used to build the per-vertex blend weight).
     // Combines angle-based masking with optional user-painted exclusion.
     const faceArea   = faceNrm.length();                               // ∝ 2× triangle area
+    if (faceArea > 1e-12) {
+      const _inv = 1 / faceArea;
+      const _fx = faceNrm.x * _inv, _fy = faceNrm.y * _inv, _fz = faceNrm.z * _inv;
+      for (let _k = 0; _k < 3; _k++) {
+        const _vid = vertexId[t + _k];
+        if (faceArea > domArea[_vid]) {
+          domArea[_vid] = faceArea;
+          domNrmX[_vid] = _fx; domNrmY[_vid] = _fy; domNrmZ[_vid] = _fz;
+        }
+      }
+    }
     const faceNzNorm = faceArea > 1e-12 ? faceNrm.z / faceArea : 0;  // unit-normal Z component
     const faceAngle  = Math.acos(Math.abs(faceNzNorm)) * (180 / Math.PI);
     const angleMasked = faceNzNorm < 0
@@ -493,7 +516,13 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // mesh-noise. Other modes ignore the normal for blending, so this is a
     // no-op there. Displacement direction (Pass 3) stays on the unsmoothed
     // smooth normal — only blend weights change here.
-    tmpNrm.set(blendNrmX[vid], blendNrmY[vid], blendNrmZ[vid]);
+    if (settings.mappingMode === 7) {
+      // Face-aligned: face-stable normal (see domNrm above), matching the
+      // shader's projN so preview and export agree.
+      tmpNrm.set(domNrmX[vid], domNrmY[vid], domNrmZ[vid]);
+    } else {
+      tmpNrm.set(blendNrmX[vid], blendNrmY[vid], blendNrmZ[vid]);
+    }
 
     const uvResult = computeUV(tmpPos, tmpNrm, settings.mappingMode, settingsWithAspect, bounds);
     let grey;
