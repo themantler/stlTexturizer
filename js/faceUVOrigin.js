@@ -171,6 +171,60 @@ export function computeFaceUVOrigins(geometry, flatAngleDeg, originMin) {
       if (v < minV[r]) minV[r] = v;
     }
   }
+  // Zero-area triangles never join a region: they cannot seed one (excluded from
+  // `order`) and cannot be flood-filled into one either, because their degenerate
+  // normal fails the same-hemisphere test. Defaulting those to origin (0,0) put a
+  // full model-scale UV jump on slivers sitting INSIDE an otherwise uniform face
+  // — scattered spikes and torn UVs in small bunches, exactly where CAD
+  // tessellation and regularize leave needles. Adopt a neighbouring region's
+  // origin instead, spreading across shared vertices so an unassigned island
+  // still resolves.
+  const vertRegion = new Int32Array(nV).fill(-1);
+  for (let t = 0; t < triCount; t++) {
+    const r = regionId[t];
+    if (r < 0) continue;
+    const b = t*3;
+    for (let k = 0; k < 3; k++) if (vertRegion[triV[b+k]] < 0) vertRegion[triV[b+k]] = r;
+  }
+  for (let t = 0; t < triCount; t++) {
+    if (regionId[t] >= 0) continue;
+    const b = t*3;
+    for (let k = 0; k < 3; k++) {
+      const r = vertRegion[triV[b+k]];
+      if (r >= 0) { regionId[t] = r; break; }
+    }
+  }
+
+  // Anything still unassigned shares no vertex with a region — an isolated
+  // degenerate island. Fall back to the region whose PLANE it sits closest to,
+  // which for a sliver lying in a face is that face. Only runs for the few
+  // leftovers, so the cost stays negligible.
+  if (nR > 0) {
+    const cX = new Float64Array(nR), cY = new Float64Array(nR), cZ = new Float64Array(nR), cN = new Float64Array(nR);
+    for (let t = 0; t < triCount; t++) {
+      const r = regionId[t]; if (r < 0) continue;
+      const b = t*3;
+      for (let k = 0; k < 3; k++) { const id = triV[b+k]; cX[r]+=vx[id]; cY[r]+=vy[id]; cZ[r]+=vz[id]; cN[r]++; }
+    }
+    for (let r = 0; r < nR; r++) if (cN[r] > 0) { cX[r]/=cN[r]; cY[r]/=cN[r]; cZ[r]/=cN[r]; }
+    for (let t = 0; t < triCount; t++) {
+      if (regionId[t] >= 0) continue;
+      const b = t*3;
+      const gx = (vx[triV[b]]+vx[triV[b+1]]+vx[triV[b+2]])/3;
+      const gy = (vy[triV[b]]+vy[triV[b+1]]+vy[triV[b+2]])/3;
+      const gz = (vz[triV[b]]+vz[triV[b+1]]+vz[triV[b+2]])/3;
+      let best = -1, bestD = Infinity;
+      for (let r = 0; r < nR; r++) {
+        if (cN[r] === 0) continue;
+        const dPlane = Math.abs((gx-cX[r])*regionNX[r] + (gy-cY[r])*regionNY[r] + (gz-cZ[r])*regionNZ[r]);
+        const dCen = Math.hypot(gx-cX[r], gy-cY[r], gz-cZ[r]);
+        const d = dPlane * 1000 + dCen;   // coplanarity dominates, centroid breaks ties
+        if (d < bestD) { bestD = d; best = r; }
+      }
+      if (best >= 0) regionId[t] = best;
+    }
+  }
+
   for (let t = 0; t < triCount; t++) {
     const r = regionId[t];
     const u0 = (r >= 0 && Number.isFinite(minU[r])) ? minU[r] : 0;
