@@ -391,10 +391,18 @@ export function remeshFlatRegions(geometry, opts = {}) {
     }
     if(loops.length===0) continue;
 
-    let axv=1,ayv=0,azv=0; if(Math.abs(Nx)>0.9){axv=0;ayv=1;azv=0;}
-    const adot=axv*Nx+ayv*Ny+azv*Nz; let e1x=axv-adot*Nx,e1y=ayv-adot*Ny,e1z=azv-adot*Nz;
-    const e1l=Math.hypot(e1x,e1y,e1z)||1; e1x/=e1l;e1y/=e1l;e1z/=e1l;
-    const e2x=Ny*e1z-Nz*e1y, e2y=Nz*e1x-Nx*e1z, e2z=Nx*e1y-Ny*e1x;
+    // In-plane basis. This MUST use the same reference axis as the Face-aligned
+    // texture basis (mapping.js mode 7): world +Z projected into the face gives
+    // "up", falling back to +Y on near-horizontal faces. It previously used world
+    // +X, so the lattice rows ran at an arbitrary angle to the texture's own axes
+    // — coincidentally aligned on some faces and diagonal on others, which reads
+    // as whole faces looking jagged while their neighbours look clean, since the
+    // texture's gradients then cut across the lattice instead of following it.
+    let upx=0,upy=0,upz=1; if(Math.abs(Nz)>0.99){upx=0;upy=1;upz=0;}
+    const adot=upx*Nx+upy*Ny+upz*Nz;
+    let e2x=upx-Nx*adot, e2y=upy-Ny*adot, e2z=upz-Nz*adot;
+    const e2l=Math.hypot(e2x,e2y,e2z)||1; e2x/=e2l; e2y/=e2l; e2z/=e2l;
+    const e1x=e2y*Nz-e2z*Ny, e1y=e2z*Nx-e2x*Nz, e1z=e2x*Ny-e2y*Nx;
     const O0=loops[0][0]; const Ox=vx[O0],Oy=vy[O0],Oz=vz[O0];
     const proj=(vid)=>[ (vx[vid]-Ox)*e1x+(vy[vid]-Oy)*e1y+(vz[vid]-Oz)*e1z, (vx[vid]-Ox)*e2x+(vy[vid]-Oy)*e2y+(vz[vid]-Oz)*e2z ];
 
