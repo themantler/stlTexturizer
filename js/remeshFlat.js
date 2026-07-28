@@ -256,7 +256,15 @@ export function cdt2d(pts, segs, inDomain) {
  * @returns {{geometry: THREE.BufferGeometry, faceParentId: Int32Array|null}}
  *   Flat faces re-meshed uniformly; everything else passed through unchanged.
  */
-const LATTICE_FACTOR = 0.7;
+// Lattice spacing as a fraction of the resolution target. Triangle count scales
+// as 1/h^2, so this is the knob that decides remesh density relative to the flip
+// path. At 0.7 remesh came out ~1/3 the triangles of Delaunay at the SAME
+// resolution setting — because remesh skips regularization (the remesh supersedes
+// it), so it never gets the regularize + re-subdivide pass that roughly triples
+// the count on fan-tessellated faces. 0.4 is 0.7/sqrt(3), which recovers that
+// factor of three and puts the two methods at comparable sharpness for one
+// resolution value — so a single preset covers both.
+const LATTICE_FACTOR = 0.4;
 // Backs off the density derived from the input region (see hEquiv below).
 // Larger = coarser; 1.0 = reproduce the input region's triangle density exactly.
 // Kept at 1.0: a 1.5 temper was calibrated on a synthetic fan and came out ~2×
