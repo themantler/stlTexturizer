@@ -38,7 +38,6 @@ import { applyDisplacement } from './displacement.js';
 import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
 import { flipCoplanarToDelaunay } from './coplanarFlip.js';
-import { computeFaceUVOrigins } from './faceUVOrigin.js';
 import { remeshFlatRegions } from './remeshFlat.js';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
@@ -293,15 +292,6 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
       if (shouldAbort()) return null;
     }
 
-    // Face-aligned mapping anchors each face's UVs at its own bottom-left
-    // corner, which needs that face's extent — computed here, on the mesh
-    // displacement is about to consume. Subdivision only adds vertices INSIDE a
-    // face, so these extents match what the coarse preview mesh yields.
-    if (settings.mappingMode === 7) {
-      const origins = computeFaceUVOrigins(subdivided, settings.flattenAngleDeg ?? 1, bounds.min);
-      subdivided.setAttribute('faceUVOrigin', new THREE.BufferAttribute(origins, 2));
-    }
-
     const subTriCount = subdivided.attributes.position.count / 3;
     onEvent('displace', 0, { triCount: subTriCount });
     await yieldFrame();
@@ -343,16 +333,7 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     // baking cost quality. decimate() and resolveTJunctions() now thread the
     // parent map through, so bake runs the identical sequence and produces the
     // same geometry export would.
-    // Decimation (and the T-junction repair gated on it) is EXPORT-only again.
-    // Running it in bake mode made a bake permanently destructive: the working
-    // mesh came back decimated and harvested, so a second bake subdivided an
-    // already-decimated mesh and decimated it again. Successive bakes compounded
-    // the loss — blurred, distorted texture with spiky artifacts, and remesh
-    // suffered doubly because its lattice density is derived from the density of
-    // the mesh it receives. Bake keeps full density; export still decimates
-    // exactly once, including when it slices an already-baked body, so the FILE
-    // you export is the same either way.
-    const runDecimation = mode === 'export' && (needsDecimation || settings.harvestFlatFaces);
+    const runDecimation = needsDecimation || settings.harvestFlatFaces;
     if (runDecimation) {
       onEvent('decimate', 0, { from: dispTriCount, needsDecimation });
       await yieldFrame();
