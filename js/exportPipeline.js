@@ -38,6 +38,7 @@ import { applyDisplacement } from './displacement.js';
 import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
 import { flipCoplanarToDelaunay } from './coplanarFlip.js';
+import { computeFaceUVOrigins } from './faceUVOrigin.js';
 import { remeshFlatRegions } from './remeshFlat.js';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
@@ -290,6 +291,15 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
       }
       if (shouldAbort()) return null;
+    }
+
+    // Face-aligned mapping anchors each face's UVs at its own bottom-left
+    // corner, which needs that face's extent — computed here, on the mesh
+    // displacement is about to consume. Subdivision only adds vertices INSIDE a
+    // face, so these extents match what the coarse preview mesh yields.
+    if (settings.mappingMode === 7) {
+      const origins = computeFaceUVOrigins(subdivided, settings.flattenAngleDeg ?? 1, bounds.min);
+      subdivided.setAttribute('faceUVOrigin', new THREE.BufferAttribute(origins, 2));
     }
 
     const subTriCount = subdivided.attributes.position.count / 3;

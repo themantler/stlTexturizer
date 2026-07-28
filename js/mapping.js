@@ -176,8 +176,16 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       // Anchor at a fixed world point so the texture does not swim between
       // faces or move when the model changes size.
       const rx = pos.x - min.x, ry = pos.y - min.y, rz = pos.z - min.z;
-      u = (rx * e1x + ry * e1y + rz * e1z) / md;
-      v = (rx * e2x + ry * e2y + rz * e2z) / md;
+      // Per-face origin, in world mm along this face's own basis, shifts u,v to
+      // 0 at the face's bottom-left corner so every face carries an identical
+      // offset relative to itself (a patterned texture then starts flush at the
+      // bottom edge of each face instead of at an arbitrary phase). Supplied by
+      // computeFaceUVOrigins via the faceUVOrigin attribute; 0 when absent,
+      // which reproduces the previous model-corner anchoring.
+      const fu0 = settings._faceUVOriginU || 0;
+      const fv0 = settings._faceUVOriginV || 0;
+      u = ((rx * e1x + ry * e1y + rz * e1z) - fu0) / md;
+      v = ((rx * e2x + ry * e2y + rz * e2z) - fv0) / md;
       break;
     }
 
