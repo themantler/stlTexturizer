@@ -276,10 +276,25 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         // handed decimation different triangle ORDERS and its edge-collapse
         // sequence diverged, so the two paths produced meshes differing by a
         // handful of triangles. Only bake keeps the remapped array.
+        // Face-aligned: hand the lattice the SAME frames the texture will use,
+        // instead of letting remesh derive its own. Remesh's regions exclude
+        // masked triangles, so on a partially-masked face its region is only the
+        // unmasked sub-area — its boundary runs along the mask cut, and the
+        // lowest straight line there is often a side edge rather than the face's
+        // real bottom. The lattice then aligned to that while the texture, whose
+        // regions span the whole face, aligned correctly: the two disagreed on
+        // exactly the partially-masked faces. Frames are computed here on the
+        // pre-remesh geometry, which the mask does not affect.
+        let latticeFrames = null;
+        if (settings.mappingMode === 7) {
+          latticeFrames = computeFaceFrames(subdivided, settings.flattenAngleDeg ?? 1,
+                                            bounds.min, settings.faceEdgeAlign || 'bottom');
+        }
         const res = remeshFlatRegions(subdivided, {
           targetLen: settings.refineLength,
           flatAngleDeg: settings.flattenAngleDeg ?? 1,
           faceEdgeAlign: settings.mappingMode === 7 ? (settings.faceEdgeAlign || 'bottom') : null,
+          faceFrames: latticeFrames,
           faceParentId,
         });
         if (res.geometry !== subdivided) { subdivided.dispose(); subdivided = res.geometry; }

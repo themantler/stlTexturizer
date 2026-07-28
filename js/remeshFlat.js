@@ -280,6 +280,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
   const flatAngleDeg = opts.flatAngleDeg ?? 1;
   const sinFlat      = Math.sin(flatAngleDeg * Math.PI / 180);
   const parentIn     = opts.faceParentId || null;
+  const frameIn      = opts.faceFrames || null;
 
   const posAttr  = geometry.attributes.position;
   const ewAttr   = geometry.attributes.excludeWeight || null;
@@ -416,7 +417,25 @@ export function remeshFlatRegions(geometry, opts = {}) {
     let e1x, e1y, e1z, e2x, e2y, e2z;
     {
       let dir = null;
-      if (edgeAlign) {
+      if (frameIn) {
+        // Prefer the texture's own frame. It is computed on the whole face,
+        // while the regions here exclude masked triangles — so on a partially
+        // masked face this region is only the unmasked sub-area and deriving an
+        // edge from ITS boundary can follow the mask cut instead of the face's
+        // real bottom edge. Taking the largest triangle's frame is robust to the
+        // two region decompositions not matching exactly.
+        let bt = -1, bA = -1;
+        for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
+        if (bt >= 0) {
+          const o = bt * 18;   // 3 corners * 6 floats
+          let ux = frameIn[o], uy = frameIn[o+1], uz = frameIn[o+2];
+          const d = ux*Nx + uy*Ny + uz*Nz;   // re-project: normals differ slightly
+          ux -= Nx*d; uy -= Ny*d; uz -= Nz*d;
+          const l = Math.hypot(ux, uy, uz);
+          if (l > 1e-9) dir = { x: ux/l, y: uy/l, z: uz/l };
+        }
+      }
+      if (!dir && edgeAlign) {
         // Identical edge choice to faceFrame.js — SHARED, not reimplemented, so
         // the lattice and the texture cannot pick different edges.
         let nSeg = 0;
