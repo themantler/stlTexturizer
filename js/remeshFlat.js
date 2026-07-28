@@ -469,7 +469,14 @@ export function remeshFlatRegions(geometry, opts = {}) {
     }
     const hBoundary = bN ? bSum / bN : Infinity;
     const h=Math.max(Math.min(hEquiv, hBoundary, targetLen * LATTICE_FACTOR), 1e-6);
-    const rowH=h*Math.sqrt(3)/2; const minGap=0.5*h;
+    // SQUARE grid, not a triangular/hex one. A triangular lattice has edges only
+    // horizontally and at +/-60 degrees — no vertical edges — so on a rectilinear
+    // texture the features running along the rows come out crisp while the
+    // perpendicular ones have to be approximated by a staircase of 60 degree
+    // edges and read as jagged (brick tops clean, brick sides ragged). A square
+    // grid carries edges along BOTH in-plane axes, so features in either
+    // direction land on lattice edges.
+    const rowH=h; const minGap=0.5*h;
     const distToBoundary=(x,y)=>{ let best=Infinity;
       for(const lp of loops2d){ for(let i=0,j=lp.length-1;i<lp.length;j=i++){
         const ax=lp[j][0],ay=lp[j][1],bx=lp[i][0],by=lp[i][1]; const dx=bx-ax,dy=by-ay; const L2=dx*dx+dy*dy||1;
@@ -477,7 +484,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
         const d=Math.hypot(x-px,y-py); if(d<best)best=d; } }
       return best; };
     let rowi=0;
-    for(let y=mny+rowH; y<mxy; y+=rowH, rowi++){ const xoff=(rowi%2)*h/2;
+    for(let y=mny+rowH; y<mxy; y+=rowH, rowi++){ const xoff=0;
       for(let x=mnx+xoff; x<mxx; x+=h){
         if(!inDom(x,y)) continue; if(distToBoundary(x,y)<minGap) continue;
         const jx=x+(Math.sin(x*12.9+y*78.2)*1e-6), jy=y+(Math.cos(x*39.3+y*11.1)*1e-6);
