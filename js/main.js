@@ -153,6 +153,8 @@ const settings = {
   // End the texture in a vertical wall at mask boundaries (crisp 90 deg edge)
   // instead of ramping down to the masked surface.
   maskEdgeWall:              false,
+  // Which edge of each flat face the Face-aligned grid and UVs align to.
+  faceEdgeAlign:             'bottom',
   flattenSlivers:            true,
   flattenAngleDeg:           1,
   // 'flip' = Delaunay edge-flip (reconnect existing verts). 'remesh' =
@@ -416,6 +418,7 @@ const flattenSliversChk      = document.getElementById('flatten-slivers-chk');
 const flattenAngleInput      = document.getElementById('flatten-angle');
 const flattenAngleRow        = document.getElementById('flatten-angle-row');
 const flattenMethodSelect    = document.getElementById('flatten-method');
+const faceEdgeAlignSelect    = document.getElementById('face-edge-align');
 const flattenMethodRow       = document.getElementById('flatten-method-row');
 // Regularize tuning inputs (Advanced panel) → settings keys consumed by
 // _regularizeOpts() and the second-pass re-subdivide multiplier.
@@ -1683,6 +1686,13 @@ function wireEvents() {
     flattenAngleInput.addEventListener('input', () => {
       const v = parseFloat(flattenAngleInput.value);
       if (Number.isFinite(v) && v > 0) settings.flattenAngleDeg = v;
+    });
+  }
+  if (faceEdgeAlignSelect) {
+    faceEdgeAlignSelect.value = settings.faceEdgeAlign;
+    faceEdgeAlignSelect.addEventListener('change', () => {
+      settings.faceEdgeAlign = faceEdgeAlignSelect.value;
+      updatePreview();
     });
   }
   if (flattenMethodSelect) {
@@ -6003,7 +6013,7 @@ const PERSISTED_KEYS = [
   'regularizeSecondPassMul', 'regularizeAspectThreshold', 'regularizeSlack',
   'regularizeAggressiveSlack', 'regularizeExtremeAspect', 'regularizeNormalDeg',
   'regularizeAggressiveNormalDeg',
-  'flattenSlivers', 'flattenAngleDeg', 'flattenMethod', 'maskEdgeWall',
+  'flattenSlivers', 'flattenAngleDeg', 'flattenMethod', 'maskEdgeWall', 'faceEdgeAlign',
   // Fixed world texture scale. These were previously only in PRESET_KEYS, so
   // they never reached the session autosave or a .bumpmesh project — the toggle
   // silently reverted to off on restart and UVs went back to being normalized by
@@ -6118,6 +6128,10 @@ function applySettingsSnapshot(snap) {
   if (snap.maskEdgeWall != null && maskEdgeWallChk) {
     settings.maskEdgeWall = snap.maskEdgeWall;
     maskEdgeWallChk.checked = snap.maskEdgeWall;
+  }
+  if (snap.faceEdgeAlign != null && faceEdgeAlignSelect) {
+    settings.faceEdgeAlign = snap.faceEdgeAlign;
+    faceEdgeAlignSelect.value = snap.faceEdgeAlign;
   }
   if (snap.flattenMethod != null && flattenMethodSelect) {
     settings.flattenMethod = snap.flattenMethod;

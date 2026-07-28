@@ -176,8 +176,24 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       // Anchor at a fixed world point so the texture does not swim between
       // faces or move when the model changes size.
       const rx = pos.x - min.x, ry = pos.y - min.y, rz = pos.z - min.z;
-      u = (rx * e1x + ry * e1y + rz * e1z) / md;
-      v = (rx * e2x + ry * e2y + rz * e2z) / md;
+      // When a per-face frame is supplied (faceFrame.js, via the faceFrame
+      // attribute) use it instead of the world-+Z-derived axes: U runs along the
+      // face's chosen edge and the origin sits at that face's own corner, so the
+      // texture and the remesh grid share one frame and cannot stair-step
+      // against each other. Falls back to the world-derived basis when absent.
+      const F = settings._faceFrame;
+      if (F) {
+        const Fx = F[0], Fy = F[1], Fz = F[2];
+        const Vx = normal.y * Fz - normal.z * Fy;
+        const Vy = normal.z * Fx - normal.x * Fz;
+        const Vz = normal.x * Fy - normal.y * Fx;
+        const vl = Math.hypot(Vx, Vy, Vz) || 1;
+        u = ((rx * Fx + ry * Fy + rz * Fz) - F[3]) / md;
+        v = ((rx * Vx + ry * Vy + rz * Vz) / vl - F[4]) / md;
+      } else {
+        u = (rx * e1x + ry * e1y + rz * e1z) / md;
+        v = (rx * e2x + ry * e2y + rz * e2z) / md;
+      }
       break;
     }
 

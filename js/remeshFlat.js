@@ -22,6 +22,7 @@
 
 import { THREE } from './threeCompat.js';
 import { QuantizedPointMap } from './meshIndex.js';
+import { referenceFrame } from './faceFrame.js';
 
 const QUANT = 1e5;
 
@@ -275,6 +276,7 @@ const DENSITY_TEMPER = 1.0;
 
 export function remeshFlatRegions(geometry, opts = {}) {
   const targetLen    = opts.targetLen ?? 1;
+  const edgeAlign    = opts.faceEdgeAlign || null;
   const flatAngleDeg = opts.flatAngleDeg ?? 1;
   const sinFlat      = Math.sin(flatAngleDeg * Math.PI / 180);
   const parentIn     = opts.faceParentId || null;
@@ -406,11 +408,51 @@ export function remeshFlatRegions(geometry, opts = {}) {
     // — coincidentally aligned on some faces and diagonal on others, which reads
     // as whole faces looking jagged while their neighbours look clean, since the
     // texture's gradients then cut across the lattice instead of following it.
-    let upx=0,upy=0,upz=1; if(Math.abs(Nz)>0.99){upx=0;upy=1;upz=0;}
-    const adot=upx*Nx+upy*Ny+upz*Nz;
-    let e2x=upx-Nx*adot, e2y=upy-Ny*adot, e2z=upz-Nz*adot;
-    const e2l=Math.hypot(e2x,e2y,e2z)||1; e2x/=e2l; e2y/=e2l; e2z/=e2l;
-    const e1x=e2y*Nz-e2z*Ny, e1y=e2z*Nx-e2x*Nz, e1z=e2x*Ny-e2y*Nx;
+    // Lattice frame. When Face-aligned supplies an edge choice, the rows run
+    // along THAT edge of this face (see faceFrame.js) — the same frame the
+    // texture uses, so grid and texture cannot stair-step against each other.
+    // Otherwise fall back to world +Z projected into the face.
+    const _R = referenceFrame(Nx, Ny, Nz);
+    let e1x, e1y, e1z, e2x, e2y, e2z;
+    {
+      let bx=0, by=0, bz=0, bestLen=-1;
+      if (edgeAlign) {
+        const useUp = (edgeAlign === 'bottom' || edgeAlign === 'top');
+        const wantMax = (edgeAlign === 'top' || edgeAlign === 'right');
+        const aX = useUp ? _R.upX : _R.rtX, aY = useUp ? _R.upY : _R.rtY, aZ = useUp ? _R.upZ : _R.rtZ;
+        // Band scales with the face's extent along the axis (see faceFrame.js).
+        let lo=Infinity, hi=-Infinity;
+        for (const loop of loops) for (let i=0;i<loop.length;i++){
+          const a=loop[i], c=loop[(i+1)%loop.length];
+          for (const id of [a,c]) { const sv = vx[id]*aX + vy[id]*aY + vz[id]*aZ;
+            if (sv < lo) lo = sv; if (sv > hi) hi = sv; } }
+        // Same position-vs-length scoring as faceFrame.js — keep them identical.
+        const span = Math.max(hi - lo, 1e-9);
+        let maxLen = 1e-9;
+        for (const loop of loops) for (let i=0;i<loop.length;i++){
+          const a=loop[i], c=loop[(i+1)%loop.length];
+          maxLen = Math.max(maxLen, Math.hypot(vx[c]-vx[a], vy[c]-vy[a], vz[c]-vz[a])); }
+        let bestScore = Infinity;
+        for (const loop of loops) for (let i=0;i<loop.length;i++){
+          const a=loop[i], c=loop[(i+1)%loop.length];
+          const mid = ((vx[a]+vx[c])*aX + (vy[a]+vy[c])*aY + (vz[a]+vz[c])*aZ) * 0.5;
+          const dist = wantMax ? (hi - mid) : (mid - lo);
+          const dx=vx[c]-vx[a], dy=vy[c]-vy[a], dz=vz[c]-vz[a];
+          const len=Math.hypot(dx,dy,dz);
+          const sc2 = (dist/span) - (len/maxLen);
+          if (sc2 < bestScore) { bestScore=sc2; bestLen=len; bx=dx; by=dy; bz=dz; } }
+        if (bestLen > 1e-9) {
+          const d = bx*Nx + by*Ny + bz*Nz;
+          e1x = bx - Nx*d; e1y = by - Ny*d; e1z = bz - Nz*d;
+          const l = Math.hypot(e1x,e1y,e1z)||1; e1x/=l; e1y/=l; e1z/=l;
+          const rX = useUp ? _R.rtX : _R.upX, rY = useUp ? _R.rtY : _R.upY, rZ = useUp ? _R.rtZ : _R.upZ;
+          if (e1x*rX + e1y*rY + e1z*rZ < 0) { e1x=-e1x; e1y=-e1y; e1z=-e1z; }
+        }
+      }
+      if (bestLen <= 1e-9 || e1x === undefined) { e1x=_R.rtX; e1y=_R.rtY; e1z=_R.rtZ; }
+      e2x = Ny*e1z - Nz*e1y; e2y = Nz*e1x - Nx*e1z; e2z = Nx*e1y - Ny*e1x;
+      const l2 = Math.hypot(e2x,e2y,e2z)||1; e2x/=l2; e2y/=l2; e2z/=l2;
+    }
     const O0=loops[0][0]; const Ox=vx[O0],Oy=vy[O0],Oz=vz[O0];
     const proj=(vid)=>[ (vx[vid]-Ox)*e1x+(vy[vid]-Oy)*e1y+(vz[vid]-Oz)*e1z, (vx[vid]-Ox)*e2x+(vy[vid]-Oy)*e2y+(vz[vid]-Oz)*e2z ];
 

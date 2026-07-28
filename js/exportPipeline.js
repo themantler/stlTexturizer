@@ -39,6 +39,7 @@ import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
 import { flipCoplanarToDelaunay } from './coplanarFlip.js';
 import { remeshFlatRegions } from './remeshFlat.js';
+import { computeFaceFrames } from './faceFrame.js';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
@@ -278,6 +279,7 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         const res = remeshFlatRegions(subdivided, {
           targetLen: settings.refineLength,
           flatAngleDeg: settings.flattenAngleDeg ?? 1,
+          faceEdgeAlign: settings.mappingMode === 7 ? (settings.faceEdgeAlign || 'bottom') : null,
           faceParentId,
         });
         if (res.geometry !== subdivided) { subdivided.dispose(); subdivided = res.geometry; }
@@ -290,6 +292,15 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
         if (flat !== subdivided) { subdivided.dispose(); subdivided = flat; }
       }
       if (shouldAbort()) return null;
+    }
+
+    // Face-aligned: one frame per flat face, anchored to the user's chosen edge.
+    // Computed on the mesh displacement is about to consume; subdivision only
+    // adds vertices inside a face so these match the coarse mesh's frames.
+    if (settings.mappingMode === 7) {
+      const frames = computeFaceFrames(subdivided, settings.flattenAngleDeg ?? 1,
+                                       bounds.min, settings.faceEdgeAlign || 'bottom');
+      subdivided.setAttribute('faceFrame', new THREE.BufferAttribute(frames, 6));
     }
 
     const subTriCount = subdivided.attributes.position.count / 3;

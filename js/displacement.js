@@ -109,6 +109,9 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   // Optional per-vertex exclusion weights threaded through by subdivision.js.
   // A face's user-exclusion flag = average of its 3 vertex weights > 0.99.
   const ewAttr = geometry.attributes.excludeWeight || null;
+  // Per-face frame (U axis + origin) for Face-aligned mode — see faceFrame.js.
+  const _ffAttr = geometry.attributes.faceFrame || null;
+  const _ff = _ffAttr ? new Float64Array(5) : null;
   // Per-face user-exclusion flag: stored separately from maskedFrac so that
   // user-excluded faces do NOT bleed reduced displacement into adjacent faces
   // via shared vertices (maskedFrac is only for angle-based blending).
@@ -517,6 +520,11 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // no-op there. Displacement direction (Pass 3) stays on the unsmoothed
     // smooth normal — only blend weights change here.
     if (settings.mappingMode === 7) {
+      if (_ffAttr) {
+        const o = i * 6, a = _ffAttr.array;
+        _ff[0]=a[o]; _ff[1]=a[o+1]; _ff[2]=a[o+2]; _ff[3]=a[o+3]; _ff[4]=a[o+4];
+        settingsWithAspect._faceFrame = _ff;
+      }
       // Face-aligned: face-stable normal (see domNrm above), matching the
       // shader's projN so preview and export agree.
       tmpNrm.set(domNrmX[vid], domNrmY[vid], domNrmZ[vid]);
