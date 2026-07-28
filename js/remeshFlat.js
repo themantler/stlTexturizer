@@ -22,7 +22,7 @@
 
 import { THREE } from './threeCompat.js';
 import { QuantizedPointMap } from './meshIndex.js';
-import { referenceFrame } from './faceFrame.js';
+import { referenceFrame, chooseAlignedDir } from './faceFrame.js';
 
 const QUANT = 1e5;
 
@@ -415,41 +415,24 @@ export function remeshFlatRegions(geometry, opts = {}) {
     const _R = referenceFrame(Nx, Ny, Nz);
     let e1x, e1y, e1z, e2x, e2y, e2z;
     {
-      let bx=0, by=0, bz=0, bestLen=-1;
+      let dir = null;
       if (edgeAlign) {
-        const useUp = (edgeAlign === 'bottom' || edgeAlign === 'top');
-        const wantMax = (edgeAlign === 'top' || edgeAlign === 'right');
-        const aX = useUp ? _R.upX : _R.rtX, aY = useUp ? _R.upY : _R.rtY, aZ = useUp ? _R.upZ : _R.rtZ;
-        // Band scales with the face's extent along the axis (see faceFrame.js).
-        let lo=Infinity, hi=-Infinity;
+        // Identical edge choice to faceFrame.js — SHARED, not reimplemented, so
+        // the lattice and the texture cannot pick different edges.
+        let nSeg = 0;
+        for (const loop of loops) nSeg += loop.length;
+        const segs = new Float64Array(nSeg * 6);
+        let o = 0;
         for (const loop of loops) for (let i=0;i<loop.length;i++){
           const a=loop[i], c=loop[(i+1)%loop.length];
-          for (const id of [a,c]) { const sv = vx[id]*aX + vy[id]*aY + vz[id]*aZ;
-            if (sv < lo) lo = sv; if (sv > hi) hi = sv; } }
-        // Same position-vs-length scoring as faceFrame.js — keep them identical.
-        const span = Math.max(hi - lo, 1e-9);
-        let maxLen = 1e-9;
-        for (const loop of loops) for (let i=0;i<loop.length;i++){
-          const a=loop[i], c=loop[(i+1)%loop.length];
-          maxLen = Math.max(maxLen, Math.hypot(vx[c]-vx[a], vy[c]-vy[a], vz[c]-vz[a])); }
-        let bestScore = Infinity;
-        for (const loop of loops) for (let i=0;i<loop.length;i++){
-          const a=loop[i], c=loop[(i+1)%loop.length];
-          const mid = ((vx[a]+vx[c])*aX + (vy[a]+vy[c])*aY + (vz[a]+vz[c])*aZ) * 0.5;
-          const dist = wantMax ? (hi - mid) : (mid - lo);
-          const dx=vx[c]-vx[a], dy=vy[c]-vy[a], dz=vz[c]-vz[a];
-          const len=Math.hypot(dx,dy,dz);
-          const sc2 = (dist/span) - (len/maxLen);
-          if (sc2 < bestScore) { bestScore=sc2; bestLen=len; bx=dx; by=dy; bz=dz; } }
-        if (bestLen > 1e-9) {
-          const d = bx*Nx + by*Ny + bz*Nz;
-          e1x = bx - Nx*d; e1y = by - Ny*d; e1z = bz - Nz*d;
-          const l = Math.hypot(e1x,e1y,e1z)||1; e1x/=l; e1y/=l; e1z/=l;
-          const rX = useUp ? _R.rtX : _R.upX, rY = useUp ? _R.rtY : _R.upY, rZ = useUp ? _R.rtZ : _R.upZ;
-          if (e1x*rX + e1y*rY + e1z*rZ < 0) { e1x=-e1x; e1y=-e1y; e1z=-e1z; }
+          segs[o]=vx[a]; segs[o+1]=vy[a]; segs[o+2]=vz[a];
+          segs[o+3]=vx[c]; segs[o+4]=vy[c]; segs[o+5]=vz[c];
+          o += 6;
         }
+        dir = chooseAlignedDir(segs, _R, edgeAlign);
       }
-      if (bestLen <= 1e-9 || e1x === undefined) { e1x=_R.rtX; e1y=_R.rtY; e1z=_R.rtZ; }
+      if (dir) { e1x=dir.x; e1y=dir.y; e1z=dir.z; }
+      else { e1x=_R.rtX; e1y=_R.rtY; e1z=_R.rtZ; }
       e2x = Ny*e1z - Nz*e1y; e2y = Nz*e1x - Nx*e1z; e2z = Nx*e1y - Ny*e1x;
       const l2 = Math.hypot(e2x,e2y,e2z)||1; e2x/=l2; e2y/=l2; e2z/=l2;
     }

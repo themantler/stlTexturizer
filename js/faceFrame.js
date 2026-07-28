@@ -58,6 +58,102 @@ export function referenceFrame(nx, ny, nz) {
 }
 
 /**
+ * Direction of the face's aligning edge, chosen from its boundary segments.
+ *
+ * Segments are first merged into straight LINES. This matters because the frame
+ * is computed on the SUBDIVIDED mesh, where a single real CAD edge arrives as
+ * many short fragments of unequal length. Scoring fragments individually let
+ * whichever fragment happened to come out longest anywhere on the boundary set U
+ * for the whole face, so the face's entire UV map rotated to an arbitrary line —
+ * and it looked correct only when that fragment happened to lie on the right
+ * edge. Merging first means a real edge is scored by its FULL length, and a
+ * curved boundary (many short, mutually non-collinear fragments) correctly loses
+ * to any genuine straight edge.
+ *
+ * @param {ArrayLike<number>} segs flat world coords, 6 per segment: ax,ay,az,cx,cy,cz
+ * @param {object} R reference frame from referenceFrame()
+ * @param {'bottom'|'top'|'left'|'right'} side
+ * @returns {{x:number,y:number,z:number}|null} unit direction, or null if none
+ */
+export function chooseAlignedDir(segs, R, side) {
+  const nSeg = (segs.length / 6) | 0;
+  if (nSeg === 0) return null;
+  const useUp = (side === 'bottom' || side === 'top');
+  const wantMax = (side === 'top' || side === 'right');
+  // In-plane 2D basis: p along "right", q along "up".
+  const pX = R.rtX, pY = R.rtY, pZ = R.rtZ;
+  const qX = R.upX, qY = R.upY, qZ = R.upZ;
+
+  const m = nSeg * 2;
+  const P = new Float64Array(m), Q = new Float64Array(m);
+  let pMin = Infinity, pMax = -Infinity, qMin = Infinity, qMax = -Infinity;
+  for (let j = 0; j < m; j++) {
+    const o = j * 3, x = segs[o], y = segs[o+1], z = segs[o+2];
+    const p = x*pX + y*pY + z*pZ, q = x*qX + y*qY + z*qZ;
+    P[j] = p; Q[j] = q;
+    if (p < pMin) pMin = p; if (p > pMax) pMax = p;
+    if (q < qMin) qMin = q; if (q > qMax) qMax = q;
+  }
+  const axisMin = useUp ? qMin : pMin, axisMax = useUp ? qMax : pMax;
+  const span = Math.max(axisMax - axisMin, 1e-9);
+  const diag = Math.hypot(pMax - pMin, qMax - qMin) || 1;
+  const offTol = Math.max(diag * 2e-3, 1e-7);
+  const COS_TOL = Math.cos(1.5 * Math.PI / 180);
+  const MAX_CLUSTERS = 4096;
+
+  // Cluster by (direction, perpendicular offset). Matching on |dot| makes this
+  // orientation-free, so a fragment pointing the other way along the same edge
+  // still joins it — folding directions into a half-plane instead would split
+  // exactly the edges that straddle the fold angle.
+  const cDx = [], cDy = [], cOff = [], cLen = [], cAxis = [];
+  for (let s = 0; s < nSeg; s++) {
+    const j0 = s*2, j1 = s*2 + 1;
+    let dx = P[j1] - P[j0], dy = Q[j1] - Q[j0];
+    const len = Math.hypot(dx, dy);
+    if (len <= 1e-12) continue;
+    dx /= len; dy /= len;
+    const axisMid = useUp ? (Q[j0] + Q[j1]) * 0.5 : (P[j0] + P[j1]) * 0.5;
+    let found = -1;
+    for (let c = 0; c < cLen.length; c++) {
+      if (Math.abs(cDx[c]*dx + cDy[c]*dy) < COS_TOL) continue;
+      if (Math.abs((cDx[c]*Q[j0] - cDy[c]*P[j0]) - cOff[c]) > offTol) continue;
+      found = c; break;
+    }
+    if (found < 0) {
+      if (cLen.length >= MAX_CLUSTERS) continue;
+      cDx.push(dx); cDy.push(dy); cOff.push(dx*Q[j0] - dy*P[j0]);
+      cLen.push(0); cAxis.push(0);
+      found = cLen.length - 1;
+    }
+    cLen[found] += len; cAxis[found] += axisMid * len;
+  }
+  if (cLen.length === 0) return null;
+
+  // Trade position against total length: a slanted edge necessarily spans a wide
+  // range along the axis, so a band around the extreme cannot find it, while
+  // length alone picks the same globally longest edge for all four sides.
+  let maxLen = 1e-9;
+  for (const L of cLen) if (L > maxLen) maxLen = L;
+  let best = Infinity, bDx = 0, bDy = 0, bLen = -1;
+  for (let c = 0; c < cLen.length; c++) {
+    const mean = cAxis[c] / cLen[c];
+    const dist = wantMax ? (axisMax - mean) : (mean - axisMin);
+    const sc = (dist / span) - (cLen[c] / maxLen);
+    if (sc < best) { best = sc; bDx = cDx[c]; bDy = cDy[c]; bLen = cLen[c]; }
+  }
+  if (bLen <= 1e-9) return null;
+
+  // Back to 3D. rt/up are orthonormal and in-plane, so U needs no re-projection.
+  let Ux = bDx*pX + bDy*qX, Uy = bDx*pY + bDy*qY, Uz = bDx*pZ + bDy*qZ;
+  const l = Math.hypot(Ux, Uy, Uz) || 1; Ux /= l; Uy /= l; Uz /= l;
+  // Keep U consistent with the reference axis so the texture is not mirrored
+  // between neighbouring faces.
+  const refX = useUp ? R.rtX : R.upX, refY = useUp ? R.rtY : R.upY, refZ = useUp ? R.rtZ : R.upZ;
+  if (Ux*refX + Uy*refY + Uz*refZ < 0) { Ux = -Ux; Uy = -Uy; Uz = -Uz; }
+  return { x: Ux, y: Uy, z: Uz };
+}
+
+/**
  * @param {THREE.BufferGeometry} geometry non-indexed
  * @param {number} flatAngleDeg max dihedral to join a flat region
  * @param {{x,y,z}} originMin bounds.min — UVs are measured relative to it
@@ -195,60 +291,21 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   const fu0 = new Float64Array(nR), fv0 = new Float64Array(nR);
   for (let r = 0; r < nR; r++) {
     const R = referenceFrame(rNX[r], rNY[r], rNZ[r]);
-    // Axis the chosen side is extreme along, and its sign.
     const useUp = (side === 'bottom' || side === 'top');
-    const aX = useUp ? R.upX : R.rtX, aY = useUp ? R.upY : R.rtY, aZ = useUp ? R.upZ : R.rtZ;
-    const wantMax = (side === 'top' || side === 'right');
     const E = bEdges[r];
-    // Extent along the chosen axis, so the "extreme band" scales with the face
-    // rather than with edge length — a band derived from the longest edge spans
-    // most of a face, which made every side select the same globally longest
-    // edge and collapsed top/bottom/left/right onto one answer.
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < E.length; i += 2) {
-      for (const id of [E[i], E[i+1]]) {
-        const s = (vx[id]-ox)*aX + (vy[id]-oy)*aY + (vz[id]-oz)*aZ;
-        if (s < lo) lo = s; if (s > hi) hi = s;
-      }
-    }
-    const ext = wantMax ? hi : lo;
-    const span = Math.max(hi - lo, 1e-9);
-    // Score each boundary edge: how far its midpoint sits from the chosen side,
-    // minus how long it is. A pure "within a band of the extreme" test cannot
-    // work for both cases — a slanted bottom edge necessarily spans a wide range
-    // along the axis and falls outside a tight band, while a loose band lets the
-    // globally longest edge win for every side. Trading position against length
-    // picks the slanted bottom edge for 'bottom' AND the vertical edge for
-    // 'left' on the same face.
-    let maxLen = 1e-9;
-    for (let i = 0; i < E.length; i += 2) {
+    const segs = new Float64Array(E.length * 3);
+    for (let i = 0, o = 0; i < E.length; i += 2, o += 6) {
       const a = E[i], c = E[i+1];
-      maxLen = Math.max(maxLen, Math.hypot(vx[c]-vx[a], vy[c]-vy[a], vz[c]-vz[a]));
+      segs[o]   = vx[a]; segs[o+1] = vy[a]; segs[o+2] = vz[a];
+      segs[o+3] = vx[c]; segs[o+4] = vy[c]; segs[o+5] = vz[c];
     }
-    let bx = 0, by = 0, bz = 0, bestScore = Infinity, bestLen = -1;
-    for (let i = 0; i < E.length; i += 2) {
-      const a = E[i], c = E[i+1];
-      const sa = (vx[a]-ox)*aX + (vy[a]-oy)*aY + (vz[a]-oz)*aZ;
-      const sc = (vx[c]-ox)*aX + (vy[c]-oy)*aY + (vz[c]-oz)*aZ;
-      const mid = (sa + sc) * 0.5;
-      const dist = wantMax ? (hi - mid) : (mid - lo);
-      const dx = vx[c]-vx[a], dy = vy[c]-vy[a], dz = vz[c]-vz[a];
-      const len = Math.hypot(dx, dy, dz);
-      const sc2 = (dist / span) - (len / maxLen);
-      if (sc2 < bestScore) { bestScore = sc2; bestLen = len; bx = dx; by = dy; bz = dz; }
-    }
-    // U = that edge's direction, projected into the plane. Falls back to the
-    // reference frame's own axis when the face has no usable edge there.
-    let Ux, Uy, Uz;
-    if (bestLen > 1e-9) {
-      const d = bx*rNX[r] + by*rNY[r] + bz*rNZ[r];
-      Ux = bx - rNX[r]*d; Uy = by - rNY[r]*d; Uz = bz - rNZ[r]*d;
-      const l = Math.hypot(Ux, Uy, Uz) || 1; Ux/=l; Uy/=l; Uz/=l;
-    } else { Ux = useUp ? R.rtX : R.upX; Uy = useUp ? R.rtY : R.upY; Uz = useUp ? R.rtZ : R.upZ; }
-    // Keep U pointing the same way as the reference "right"/"up" so the texture
-    // does not appear mirrored between neighbouring faces.
-    const refX = useUp ? R.rtX : R.upX, refY = useUp ? R.rtY : R.upY, refZ = useUp ? R.rtZ : R.upZ;
-    if (Ux*refX + Uy*refY + Uz*refZ < 0) { Ux = -Ux; Uy = -Uy; Uz = -Uz; }
+    // U = the aligning edge's direction, so grid rows and texture run parallel
+    // to it. Falls back to the reference frame's own axis when the face has no
+    // usable edge there.
+    const dir = chooseAlignedDir(segs, R, side);
+    const Ux = dir ? dir.x : (useUp ? R.rtX : R.upX);
+    const Uy = dir ? dir.y : (useUp ? R.rtY : R.upY);
+    const Uz = dir ? dir.z : (useUp ? R.rtZ : R.upZ);
     fUx[r] = Ux; fUy[r] = Uy; fUz[r] = Uz;
   }
 
