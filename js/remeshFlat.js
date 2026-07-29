@@ -512,7 +512,17 @@ export function remeshFlatRegions(geometry, opts = {}) {
       }
     }
     const hBoundary = bN ? bSum / bN : Infinity;
-    const h=Math.max(Math.min(hEquiv, hBoundary, targetLen * LATTICE_FACTOR), 1e-6);
+    const hMax = Math.max(targetLen * LATTICE_FACTOR, 1e-6);
+    const hRaw = Math.max(Math.min(hEquiv, hBoundary, hMax), 1e-6);
+    // Snap the spacing to a dyadic fraction of the resolution bound. A face that
+    // is masked in part, or whose triangles fail the flatness test in a band, is
+    // split into SEVERAL regions here, and each derives its own spacing from its
+    // own input density. Unequal spacings cannot share a grid, so the pieces
+    // interfere where they meet. Dyadic values either match or differ by 2:1, and
+    // a 2:1 lattice still NESTS inside the finer one instead of cutting across
+    // it. Rounding (not flooring) keeps density within sqrt(2) of the tuned
+    // value in both directions rather than doubling it.
+    const h = hMax / Math.pow(2, Math.max(0, Math.round(Math.log2(hMax / hRaw))));
     // SQUARE grid, not a triangular/hex one. A triangular lattice has edges only
     // horizontally and at +/-60 degrees — no vertical edges — so on a rectilinear
     // texture the features running along the rows come out crisp while the
@@ -527,9 +537,21 @@ export function remeshFlatRegions(geometry, opts = {}) {
         let tt=((x-ax)*dx+(y-ay)*dy)/L2; tt=tt<0?0:tt>1?1:tt; const px=ax+tt*dx,py=ay+tt*dy;
         const d=Math.hypot(x-px,y-py); if(d<best)best=d; } }
       return best; };
-    let rowi=0;
-    for(let y=mny+rowH; y<mxy; y+=rowH, rowi++){ const xoff=0;
-      for(let x=mnx+xoff; x<mxx; x+=h){
+    // Anchor the grid in WORLD space, not to this region's own bounding box. The
+    // 2D frame's origin is loops[0][0] — a different boundary vertex for every
+    // region — so a box-anchored grid put each piece of a split face at its own
+    // arbitrary phase. Same orientation, wrong offset: where two pieces meet the
+    // rows do not line up and the CDT stitches them with irregular triangles,
+    // which reads as a band of jaggedness, or as a neighbouring face's mesh
+    // appearing to intrude. Projecting the local origin back out puts every
+    // region that shares an axis (all pieces of a face, via its shared frame) on
+    // ONE infinite grid.
+    const O0e1 = Ox*e1x + Oy*e1y + Oz*e1z;
+    const O0e2 = Ox*e2x + Oy*e2y + Oz*e2z;
+    const startX = Math.ceil((mnx + O0e1) / h) * h - O0e1;
+    const startY = Math.ceil((mny + O0e2) / rowH) * rowH - O0e2;
+    for(let y=startY; y<mxy; y+=rowH){
+      for(let x=startX; x<mxx; x+=h){
         if(!inDom(x,y)) continue; if(distToBoundary(x,y)<minGap) continue;
         const jx=x+(Math.sin(x*12.9+y*78.2)*1e-6), jy=y+(Math.cos(x*39.3+y*11.1)*1e-6);
         pts2d.push([jx,jy]);
