@@ -129,16 +129,28 @@ export function chooseAlignedDir(segs, R, side) {
   }
   if (cLen.length === 0) return null;
 
-  // Trade position against total length: a slanted edge necessarily spans a wide
-  // range along the axis, so a band around the extreme cannot find it, while
-  // length alone picks the same globally longest edge for all four sides.
+  // Score = position + orientation - length.
+  //
+  // Position alone cannot find a slanted bottom edge (it necessarily spans a
+  // wide range along the axis), and length alone picks the same globally longest
+  // edge for all four sides. But position-vs-length ALONE fails on any face
+  // taller than it is wide: on a 2-triangle strip the vertical side really is
+  // the longest cluster, so it wins 'bottom' outright and the face's whole UV
+  // map turns 90 degrees. On a real part that was 49% of wall area.
+  //
+  // The orientation term is what separates them: an edge that qualifies as the
+  // "bottom" runs ACROSS the axis, so its direction has little component ALONG
+  // it — 0 for a horizontal edge, 0.42 for one slanted 25 degrees, 1.0 for a
+  // vertical one. Position is weighted double so a long edge higher up cannot
+  // outbid a shorter edge actually at the bottom.
   let maxLen = 1e-9;
   for (const L of cLen) if (L > maxLen) maxLen = L;
   let best = Infinity, bDx = 0, bDy = 0, bLen = -1;
   for (let c = 0; c < cLen.length; c++) {
     const mean = cAxis[c] / cLen[c];
     const dist = wantMax ? (axisMax - mean) : (mean - axisMin);
-    const sc = (dist / span) - (cLen[c] / maxLen);
+    const alongAxis = useUp ? Math.abs(cDy[c]) : Math.abs(cDx[c]);
+    const sc = 2 * (dist / span) + alongAxis - (cLen[c] / maxLen);
     if (sc < best) { best = sc; bDx = cDx[c]; bDy = cDy[c]; bLen = cLen[c]; }
   }
   if (bLen <= 1e-9) return null;
@@ -160,7 +172,7 @@ export function chooseAlignedDir(segs, R, side) {
  * @param {'bottom'|'top'|'left'|'right'} side edge to align to
  * @returns {Float32Array} 6 floats per corner: Ux,Uy,Uz,u0,v0,0
  */
-export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bottom') {
+export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bottom', diagOut = null) {
   const posAttr  = geometry.attributes.position;
   const nCorner  = posAttr.count;
   const triCount = (nCorner / 3) | 0;
@@ -286,6 +298,11 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
     }
   }
 
+  const _rArea = new Float64Array(nR), _rTris = new Int32Array(nR);
+  if (diagOut) for (let t = 0; t < triCount; t++) {
+    const r = regionId[t]; if (r >= 0) { _rArea[r] += tArea[t]; _rTris[r]++; }
+  }
+
   // Per region: pick the aligning edge, build the frame, record the origin.
   const fUx = new Float64Array(nR), fUy = new Float64Array(nR), fUz = new Float64Array(nR);
   const fu0 = new Float64Array(nR), fv0 = new Float64Array(nR);
@@ -307,6 +324,10 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
     const Uy = dir ? dir.y : (useUp ? R.rtY : R.upY);
     const Uz = dir ? dir.z : (useUp ? R.rtZ : R.upZ);
     fUx[r] = Ux; fUy[r] = Uy; fUz[r] = Uz;
+    if (diagOut) diagOut.push({ region: r, normal: [rNX[r], rNY[r], rNZ[r]],
+                                tris: _rTris[r], area: _rArea[r],
+                                boundarySegs: E.length / 2,
+                                U: [Ux, Uy, Uz], usedFallback: !dir });
   }
 
   // Origin: the face's minimum along its own U and V.
