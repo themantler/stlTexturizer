@@ -55,7 +55,7 @@ function pointInLoops(x, y, loops) {
  * @param {function}               inDomain   (cx,cy)=>bool centroid test (holes/exterior)
  * @returns {Array<[number,number,number]>} triangles (indices into pts), inside only
  */
-export function cdt2d(pts, segs, inDomain) {
+export function cdt2d(pts, segs, inDomain, stats) {
   const n = pts.length;
   if (n < 3) return [];
 
@@ -175,6 +175,7 @@ export function cdt2d(pts, segs, inDomain) {
     for (let t = 0; t < TV.length/3; t++) { if (dead[t]) continue; if (edgeIn(t, a, b) >= 0) { const e = edgeIn(t,a,b); const u=TV[t*3+(e+1)%3], v=TV[t*3+(e+2)%3]; if((u===a&&v===b)||(u===b&&v===a)) return true; } }
     return false;
   };
+  let _unrecovered = 0;
   for (const [a, b] of segs) {
     if (hasEdge(a, b)) continue;
     // Flip edges crossing segment a-b (bounded iterations).
@@ -199,7 +200,9 @@ export function cdt2d(pts, segs, inDomain) {
       }
       if (!flipped) break;
     }
+    if (!hasEdge(a, b)) _unrecovered++;
   }
+  if (stats) stats.unrecovered = _unrecovered;
 
   function flipEdge(t, e) {
     const nt = TN[t*3+e]; if (nt < 0) return false;
@@ -220,14 +223,53 @@ export function cdt2d(pts, segs, inDomain) {
     return true;
   }
 
-  // Collect live triangles inside the domain, excluding any touching super verts.
+  // Classify inside/outside by PARITY FLOOD FILL across triangle adjacency,
+  // toggling at each constrained edge, rather than by testing each triangle's
+  // centroid against the polygon.
+  //
+  // A centroid test is ambiguous for the sliver triangles that sit ON the
+  // boundary: the centroid lands within floating-point distance of a loop edge
+  // and the even-odd test can go either way, so an occasional triangle is
+  // dropped or kept wrongly. One dropped triangle leaves a hole, whose edges are
+  // then exposed as boundary where the region has none, and the face no longer
+  // matches its neighbour: a crack. Measured on the hip face, exactly ONE
+  // triangle of 680 boundary edges' worth was misclassified -- enough to make the
+  // whole face non-watertight.
+  //
+  // Parity is path-independent here because the constraints form closed loops, so
+  // flooding outward from the super-triangle (which is definitionally outside)
+  // gives the same even-odd answer with no geometric predicate on the boundary.
+  const constrained = new Set();
+  for (const [a, b] of segs) constrained.add(a < b ? a + '_' + b : b + '_' + a);
+  const nTri = TV.length / 3;
+  const label = new Int8Array(nTri).fill(-1);   // -1 unvisited, 0 outside, 1 inside
+  const queue = [];
+  for (let t = 0; t < nTri; t++) {
+    if (dead[t]) continue;
+    const a = TV[t*3], b = TV[t*3+1], c = TV[t*3+2];
+    if (a >= s0 || b >= s0 || c >= s0) { label[t] = 0; queue.push(t); }
+  }
+  while (queue.length) {
+    const t = queue.pop();
+    for (let e = 0; e < 3; e++) {
+      const nt = TN[t*3+e];
+      if (nt < 0 || dead[nt] || label[nt] !== -1) continue;
+      const u = TV[t*3+(e+1)%3], v = TV[t*3+(e+2)%3];
+      const k = u < v ? u + '_' + v : v + '_' + u;
+      label[nt] = constrained.has(k) ? (label[t] ^ 1) : label[t];
+      queue.push(nt);
+    }
+  }
   const out = [];
-  for (let t = 0; t < TV.length/3; t++) {
+  for (let t = 0; t < nTri; t++) {
     if (dead[t]) continue;
     const a = TV[t*3], b = TV[t*3+1], c = TV[t*3+2];
     if (a >= s0 || b >= s0 || c >= s0) continue;
-    const gx = (px(a)+px(b)+px(c))/3, gy = (py(a)+py(b)+py(c))/3;
-    if (inDomain(gx, gy)) out.push([a, b, c]);
+    // Unreached triangles (adjacency gaps) fall back to the centroid test.
+    const inside = label[t] === -1
+      ? inDomain((px(a)+px(b)+px(c))/3, (py(a)+py(b)+py(c))/3)
+      : label[t] === 1;
+    if (inside) out.push([a, b, c]);
   }
   return out;
 }
@@ -377,6 +419,8 @@ export function remeshFlatRegions(geometry, opts = {}) {
 
   // Output accumulators.
   const outP=[], outN=[], outW=[], outParent=[];
+  const outRegion=[];   // debug: source region per output triangle (-1 = passthrough)
+  let _curRegion=-1;
   const remeshed = new Uint8Array(regionNX.length);
   const pushTri=(p0,p1,p2,w0,w1,w2,par)=>{
     const e1x=p1[0]-p0[0],e1y=p1[1]-p0[1],e1z=p1[2]-p0[2], e2x=p2[0]-p0[0],e2y=p2[1]-p0[1],e2z=p2[2]-p0[2];
@@ -385,9 +429,11 @@ export function remeshFlatRegions(geometry, opts = {}) {
     outN.push(nx,ny,nz,nx,ny,nz,nx,ny,nz);
     if(ewv) outW.push(w0,w1,w2);
     if(parentIn) outParent.push(par|0);
+    outRegion.push(_curRegion);
   };
 
   for (let r = 0; r < regionNX.length; r++) {
+    _curRegion = r;
     const Nx=regionNX[r],Ny=regionNY[r],Nz=regionNZ[r];
     // Directed boundary edges (region on the left), traversed as EDGES.
     //
@@ -420,20 +466,53 @@ export function remeshFlatRegions(geometry, opts = {}) {
       }
       continue;
     }
+    // At a pinch vertex the incoming and outgoing edges can be paired two ways,
+    // and only one yields non-crossing loops that bound the region correctly.
+    // Consuming edges in insertion order picked arbitrarily, which let a loop
+    // enclose area belonging to a NEIGHBOURING region (an edge with three
+    // incident triangles) or exclude its own (a hole, an edge with one). Taking
+    // the next outgoing edge clockwise from the reverse of the incoming one is
+    // the standard planar face traversal and keeps the region on the left.
+    const _R0 = referenceFrame(Nx, Ny, Nz);
+    const angOf = (from, to) => {
+      const ex=vx[to]-vx[from], ey=vy[to]-vy[from], ez=vz[to]-vz[from];
+      return Math.atan2(ex*_R0.upX + ey*_R0.upY + ez*_R0.upZ,
+                        ex*_R0.rtX + ey*_R0.rtY + ez*_R0.rtZ);
+    };
+    const TAU = Math.PI * 2;
+    const pickNext = (v, prev) => {
+      const arr = outE.get(v);
+      if (arr.length === 1 || prev < 0) return 0;
+      const base = angOf(v, prev);
+      let best = 0, bestD = Infinity;
+      for (let i = 0; i < arr.length; i++) {
+        let d = base - angOf(v, arr[i]);
+        d = ((d % TAU) + TAU) % TAU;
+        if (d < 1e-12) d = TAU;          // the reverse edge is the last resort
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      return best;
+    };
     const loops=[];
     for(const startV of [...outE.keys()]){
       while((outE.get(startV)||[]).length){
-        const loop=[]; let v=startV; let guard=0; let closed=false;
+        const loop=[]; let v=startV, prev=-1, guard=0, closed=false;
         while(guard++<count+2){
           const arr=outE.get(v);
           if(!arr || !arr.length) break;
+          const w = arr.splice(pickNext(v, prev), 1)[0];
           loop.push(v);
-          v=arr.shift();                 // consume this directed edge
+          prev = v; v = w;
           if(v===startV){ closed=true; break; }
         }
         if(closed && loop.length>=3) loops.push(loop);
         if(!closed) break;               // open chain: stop walking from here
       }
+    }
+    if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+      let left=0; for(const arr of outE.values()) left+=arr.length;
+      if(left>0){ let a=0; for(const t of regionTris[r]) a+=tArea[t];
+        console.log(`[remesh] region ${r} INCOMPLETE LOOPS: ${left} of ${count} boundary edges unconsumed, ${loops.length} loops, area=${a.toFixed(2)}`); }
     }
     if(loops.length===0) continue;
 
@@ -654,9 +733,66 @@ export function remeshFlatRegions(geometry, opts = {}) {
         `e2=[${e2x.toFixed(3)},${e2y.toFixed(3)},${e2z.toFixed(3)}] ` +
         `hEquiv=${hEquiv.toFixed(4)} hBoundary=${hBoundary.toFixed(4)} hMax=${hMax.toFixed(4)} hBand=${hBand.toFixed(4)}`);
     }
-    let tris;
-    try { tris = cdt2d(pts2d, segs, inDom); } catch(e) { tris=null; }
+    let tris; const cdtStats = {};
+    try { tris = cdt2d(pts2d, segs, inDom, cdtStats); } catch(e) { tris=null; }
     if(!tris || tris.length===0) continue;
+    // Refuse output whose boundary was not honoured. When constraint recovery
+    // fails, the emitted triangles do not reproduce the region's own boundary, so
+    // the shared edge with the neighbouring region no longer matches: T-junctions
+    // and cracks, which is where every remaining non-manifold edge came from
+    // (18 segments over 6 regions on the test part). Passing the region through
+    // un-remeshed keeps the mesh watertight; those regions are tiny, so the
+    // texture cost is nil next to shipping a non-manifold body.
+    // Verify the output reproduces the region's boundary EXACTLY, and pass the
+    // region through un-remeshed if it does not.
+    //
+    // The region's boundary is shared with its neighbours, which are either
+    // remeshed on their own boundary or passed through unchanged. So the ONLY way
+    // the result stays watertight is if the emitted triangles have precisely the
+    // region's own boundary edges and no others. Constraint recovery can fail
+    // (18 segments over 6 regions on the test part), and domain classification can
+    // drop or add a triangle at the rim; both leave the boundary subtly different
+    // and produce T-junctions, cracks, and edges shared by three triangles. Rather
+    // than enumerate those failure modes, check the invariant that matters.
+    // The regions this rejects are tiny (0.000-0.122 sq mm measured), so the
+    // texture cost is nil against shipping a non-manifold body.
+    let boundaryOK = cdtStats.unrecovered === 0;
+    if (boundaryOK) {
+      const ec = new Map();
+      for (const [a,b,c] of tris) {
+        for (const [u,v] of [[a,b],[b,c],[c,a]]) {
+          const k = u<v ? u+'_'+v : v+'_'+u;
+          ec.set(k, (ec.get(k)||0) + 1);
+        }
+      }
+      const want = new Set();
+      for (const [u,v] of segs) want.add(u<v ? u+'_'+v : v+'_'+u);
+      // Two conditions, and deliberately NOT an exact edge-count match: a PINCHED
+      // region lists some edges twice (once per loop it belongs to), so requiring
+      // equal counts rejected the hip face itself -- 107.8 sq mm, the very face
+      // this pass exists to rebuild.
+      //   1. every edge the output exposes as boundary must BE a boundary edge
+      //   2. every boundary edge must be covered by the output
+      let badExposed = 0, badN = 0, uncovered = 0;
+      for (const [k,n] of ec) {
+        if (n === 2) continue;
+        if (n === 1 && want.has(k)) continue;
+        if (n === 1) badExposed++; else badN++;
+      }
+      for (const k of want) if (!ec.has(k)) uncovered++;
+      boundaryOK = (badExposed + badN + uncovered) === 0;
+      if (!boundaryOK && typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+        console.log(`[remesh]   region ${r} detail: exposed-not-boundary=${badExposed} ` +
+          `bad-incidence=${badN} uncovered-boundary=${uncovered} of ${want.size} boundary edges`);
+      }
+    }
+    if (!boundaryOK) {
+      if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+        console.log(`[remesh] region ${r} boundary mismatch ` +
+          `(unrecovered=${cdtStats.unrecovered}) area=${regArea.toFixed(3)} -> passthrough`);
+      }
+      continue;
+    }
 
     // Parent inheritance: locate each new triangle's centroid among the region's
     // ORIGINAL triangles (projected to the same 2D basis) so bake keeps a valid
@@ -711,6 +847,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
     remeshed[r]=1;
   }
 
+  _curRegion = -1;
   // Pass through everything not remeshed (masked, curved, failed regions).
   for (let t=0;t<triCount;t++){
     const r=regionId[t];
@@ -754,6 +891,11 @@ export function remeshFlatRegions(geometry, opts = {}) {
   }
 
   const out=new THREE.BufferGeometry();
+  if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+    const fReg = new Int32Array(nOut);
+    for (let o = 0; o < nOut; o++) fReg[o] = outRegion[order2 ? order2[o] : o];
+    out.userData.regionOf = fReg;
+  }
   out.setAttribute('position', new THREE.BufferAttribute(fPos,3));
   out.setAttribute('normal',   new THREE.BufferAttribute(fNrm,3));
   if(fW) out.setAttribute('excludeWeight', new THREE.BufferAttribute(fW,1));
