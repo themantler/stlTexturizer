@@ -295,6 +295,7 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
           flatAngleDeg: settings.flattenAngleDeg ?? 1,
           faceEdgeAlign: settings.mappingMode === 7 ? (settings.faceEdgeAlign || 'bottom') : null,
           faceFrames: latticeFrames,
+          originMin: bounds.min,
           faceParentId,
         });
         if (res.geometry !== subdivided) { subdivided.dispose(); subdivided = res.geometry; }

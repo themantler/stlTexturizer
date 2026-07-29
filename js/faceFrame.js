@@ -351,6 +351,7 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
     fu0[r] = Number.isFinite(minU[r]) ? minU[r] : 0;
     fv0[r] = Number.isFinite(minV[r]) ? minV[r] : 0;
   }
+  if (diagOut) for (const d of diagOut) { d.u0 = fu0[d.region]; d.v0 = fv0[d.region]; }
 
   for (let t = 0; t < triCount; t++) {
     const r = regionId[t];

@@ -281,6 +281,10 @@ export function remeshFlatRegions(geometry, opts = {}) {
   const sinFlat      = Math.sin(flatAngleDeg * Math.PI / 180);
   const parentIn     = opts.faceParentId || null;
   const frameIn      = opts.faceFrames || null;
+  // Bounds min that faceFrame.js measured u0,v0 from; needed to convert its
+  // origin into this function's per-region 2D frame.
+  const _om          = opts.originMin || null;
+  const omx = _om ? _om.x : null, omy = _om ? _om.y : 0, omz = _om ? _om.z : 0;
 
   const posAttr  = geometry.attributes.position;
   const ewAttr   = geometry.attributes.excludeWeight || null;
@@ -534,19 +538,38 @@ export function remeshFlatRegions(geometry, opts = {}) {
         let tt=((x-ax)*dx+(y-ay)*dy)/L2; tt=tt<0?0:tt>1?1:tt; const px=ax+tt*dx,py=ay+tt*dy;
         const d=Math.hypot(x-px,y-py); if(d<best)best=d; } }
       return best; };
-    // Anchor the grid in WORLD space, not to this region's own bounding box. The
-    // 2D frame's origin is loops[0][0] — a different boundary vertex for every
-    // region — so a box-anchored grid put each piece of a split face at its own
-    // arbitrary phase. Same orientation, wrong offset: where two pieces meet the
-    // rows do not line up and the CDT stitches them with irregular triangles,
-    // which reads as a band of jaggedness, or as a neighbouring face's mesh
-    // appearing to intrude. Projecting the local origin back out puts every
-    // region that shares an axis (all pieces of a face, via its shared frame) on
-    // ONE infinite grid.
-    const O0e1 = Ox*e1x + Oy*e1y + Oz*e1z;
-    const O0e2 = Ox*e2x + Oy*e2y + Oz*e2z;
-    const startX = Math.ceil((mnx + O0e1) / h) * h - O0e1;
-    const startY = Math.ceil((mny + O0e2) / rowH) * rowH - O0e2;
+    // Register the grid to the TEXTURE's origin, not to this region's bounding
+    // box and not to world zero.
+    //
+    // The 2D frame's origin is loops[0][0] — a different boundary vertex for
+    // every region — so a box-anchored grid gave each region its own arbitrary
+    // phase. Anchoring to world zero fixed that but left the lattice unregistered
+    // against the texture: the texture measures u,v from the FACE's own origin
+    // (faceFrame.js records it as u0,v0), so lattice lines and texture features
+    // lined up in one direction and fell mid-cell in the other, depending on
+    // where the face happened to sit. A feature that lands on a lattice line
+    // reproduces crisply; one that falls between lines is smeared across a cell.
+    // That is direction-dependent for no reason the part can explain.
+    //
+    // Using u0,v0 as the phase makes u=0 and v=0 lattice lines and the texture
+    // origin coincide, so both directions are registered the same way. It also
+    // still puts every region sharing a frame on one grid, since they share u0,v0.
+    // Phase only — spacing is untouched, so this cannot violate the hBoundary cap.
+    let phU = 0, phV = 0;
+    if (frameIn && omx !== null) {
+      let bt = -1, bA = -1;
+      for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
+      if (bt >= 0) {
+        const o = bt * 18;
+        phU = frameIn[o+3] - ((Ox-omx)*e1x + (Oy-omy)*e1y + (Oz-omz)*e1z);
+        phV = frameIn[o+4] - ((Ox-omx)*e2x + (Oy-omy)*e2y + (Oz-omz)*e2z);
+      }
+    } else {
+      phU = -(Ox*e1x + Oy*e1y + Oz*e1z);
+      phV = -(Ox*e2x + Oy*e2y + Oz*e2z);
+    }
+    const startX = Math.ceil((mnx - phU) / h) * h + phU;
+    const startY = Math.ceil((mny - phV) / rowH) * rowH + phV;
     for(let y=startY; y<mxy; y+=rowH){
       for(let x=startX; x<mxx; x+=h){
         if(!inDom(x,y)) continue; if(distToBoundary(x,y)<minGap) continue;
