@@ -41,6 +41,11 @@ import { flipCoplanarToDelaunay } from './coplanarFlip.js';
 import { remeshFlatRegions } from './remeshFlat.js';
 import { computeFaceFrames, FRAME_STRIDE } from './faceFrame.js';
 
+// Bump when changing pipeline behaviour. Printed in the summary line below so
+// "did my change actually load?" is answerable from the console instead of
+// inferred from the output.
+const BUILD_TAG = 'band-cap';
+
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
 // Revive a structured-cloned bounds object ({x,y,z} plain objects) into real
@@ -422,7 +427,8 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
       ` disp=${dispTriCount.toLocaleString()}` +
       ` ${runDecimation ? `decim=${(finalGeometry.attributes.position.count/3).toLocaleString()}` : 'decim=skipped'}` +
       ` budget=${settings.maxTriangles.toLocaleString()} harvest=${settings.harvestFlatFaces ? 'on' : 'off'}` +
-      ` regularize=${_doRegularize ? 'on' : 'off'} flatten=${settings.flattenSlivers !== false ? (settings.flattenMethod || 'flip') : 'off'}`,
+      ` regularize=${_doRegularize ? 'on' : 'off'} flatten=${settings.flattenSlivers !== false ? (settings.flattenMethod || 'flip') : 'off'}` +
+      ` build=${BUILD_TAG}`,
       'color:#08a'
     );
 
