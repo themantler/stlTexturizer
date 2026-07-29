@@ -523,7 +523,17 @@ export function remeshFlatRegions(geometry, opts = {}) {
     // the seam between pieces but across the whole face. Making pieces share a
     // grid has to come from a rule that only ever refines.
     const hMax = Math.max(targetLen * LATTICE_FACTOR, 1e-6);
-    const h = Math.max(Math.min(hEquiv, hBoundary, hMax), 1e-6);
+    // Also cap h by the region's NARROW dimension. Interior lattice points are
+    // culled within h/2 of the boundary, so on a strip only a few h wide every
+    // interior point is culled and the CDT fills the strip with slivers spanning
+    // it: long edges along the strip, almost none across. Measured on chamfer
+    // faces of a real part, 72% of edges lay along U and 1% along V — the axis
+    // was correct but carried no lattice at all, which is why alignment fixes
+    // never touched it. Requiring ~4 rows across the narrow dimension restores a
+    // two-dimensional lattice there. This only ever REFINES, so it cannot break
+    // the hBoundary cap the way the reverted dyadic snap did.
+    const hNarrow = Math.min(mxx - mnx, mxy - mny) / 4;
+    const h = Math.max(Math.min(hEquiv, hBoundary, hMax, hNarrow), 1e-6);
     // SQUARE grid, not a triangular/hex one. A triangular lattice has edges only
     // horizontally and at +/-60 degrees — no vertical edges — so on a rectilinear
     // texture the features running along the rows come out crisp while the
