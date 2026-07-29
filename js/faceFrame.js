@@ -333,8 +333,12 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   // Origin: the face's minimum along its own U and V.
   const minU = new Float64Array(nR).fill(Infinity);
   const minV = new Float64Array(nR).fill(Infinity);
+  const rPx = new Float64Array(nR), rPy = new Float64Array(nR), rPz = new Float64Array(nR);
+  const rHasP = new Uint8Array(nR);
   for (let t = 0; t < triCount; t++) {
     const r = regionId[t]; if (r < 0) continue;
+    if (!rHasP[r]) { const id0 = triV[t*3];
+      rPx[r] = vx[id0]; rPy[r] = vy[id0]; rPz[r] = vz[id0]; rHasP[r] = 1; }
     const Ux = fUx[r], Uy = fUy[r], Uz = fUz[r];
     const Vx = rNY[r]*Uz - rNZ[r]*Uy, Vy = rNZ[r]*Ux - rNX[r]*Uz, Vz = rNX[r]*Uy - rNY[r]*Ux;
     const b = t*3;
@@ -350,6 +354,27 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   for (let r = 0; r < nR; r++) {
     fu0[r] = Number.isFinite(minU[r]) ? minU[r] : 0;
     fv0[r] = Number.isFinite(minV[r]) ? minV[r] : 0;
+  }
+
+  // Regions on the SAME plane sharing the same axis are pieces of ONE face,
+  // split by a window, a recess or a run of the flatness test. They have to
+  // share an origin: measured per region, a wall broken by openings handed each
+  // piece its own u0,v0, so the pattern restarted at every piece instead of
+  // continuing across the wall — and since the remesh lattice takes its phase
+  // from u0,v0, the pieces' grids were offset from each other too. On the test
+  // part the outermost front plane alone carried four different origins.
+  {
+    const gk = new Array(nR), gmin = new Map();
+    for (let r = 0; r < nR; r++) {
+      const off = rPx[r]*rNX[r] + rPy[r]*rNY[r] + rPz[r]*rNZ[r];
+      const k = [rNX[r], rNY[r], rNZ[r], fUx[r], fUy[r], fUz[r], off]
+        .map(x => Math.round(x * 1e3)).join(',');
+      gk[r] = k;
+      const g = gmin.get(k);
+      if (!g) gmin.set(k, { u: fu0[r], v: fv0[r] });
+      else { if (fu0[r] < g.u) g.u = fu0[r]; if (fv0[r] < g.v) g.v = fv0[r]; }
+    }
+    for (let r = 0; r < nR; r++) { const g = gmin.get(gk[r]); fu0[r] = g.u; fv0[r] = g.v; }
   }
   if (diagOut) for (const d of diagOut) { d.u0 = fu0[d.region]; d.v0 = fv0[d.region]; }
 
