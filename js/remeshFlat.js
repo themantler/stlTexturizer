@@ -272,6 +272,7 @@ const LATTICE_FACTOR = 0.4;
 // coarser than the flip path on real CAD parts (356k vs 1.46M triangles), which
 // read as a "smudged"/over-blurred texture. Parity with the mesh the remesh
 // receives is the right target — same sampling density, uniform orientation.
+const LATTICE_SHEAR = 1e-3;   // breaks cell cocircularity consistently (see below)
 const BAND_RATIO = 0.135;      // h <= BAND_RATIO * area/perimeter (see below)
 const BAND_MAX_REFINE = 2;    // ...but never finer than hMax/2, to bound the cost
 const DENSITY_TEMPER = 1.0;
@@ -598,7 +599,19 @@ export function remeshFlatRegions(geometry, opts = {}) {
     for(let y=startY; y<mxy; y+=rowH){
       for(let x=startX; x<mxx; x+=h){
         if(!inDom(x,y)) continue; if(distToBoundary(x,y)<minGap) continue;
-        const jx=x+(Math.sin(x*12.9+y*78.2)*1e-6), jy=y+(Math.cos(x*39.3+y*11.1)*1e-6);
+        // Deterministic micro-shear, NOT pseudo-random jitter. A square cell's
+        // four corners are cocircular, so its Delaunay diagonal is genuinely
+        // tied and whatever perturbation is applied decides it. Random jitter
+        // therefore made the diagonal a coin flip: measured 50/50 with the
+        // neighbouring cell differing 53-69% of the time, i.e. incoherent across
+        // the lattice. A texture feature crossing the cells is then rebuilt
+        // along a random zigzag, which is the sawtooth seen along mortar joints
+        // running across the rows, while joints running ALONG a lattice line
+        // stayed clean. Shearing makes every cell a parallelogram — never cyclic
+        // — so the diagonal is unique, identical everywhere, and the staircase
+        // becomes regular rather than ragged. The displacement is h/1000, orders
+        // of magnitude below print resolution.
+        const jx = x + y * LATTICE_SHEAR, jy = y;
         pts2d.push([jx,jy]);
         pt3d.push([Ox+jx*e1x+jy*e2x, Oy+jx*e1y+jy*e2y, Oz+jx*e1z+jy*e2z]);
         ptW.push(0);
