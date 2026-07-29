@@ -183,13 +183,14 @@ export function computeUV(pos, normal, mode, settings, bounds) {
       // against each other. Falls back to the world-derived basis when absent.
       const F = settings._faceFrame;
       if (F) {
+        // Both axes come from the face frame. V is NOT rebuilt from the
+        // per-vertex normal here: doing so left u on a constant per-face axis
+        // while v tracked every wobble of that normal, so the two directions of
+        // the pattern behaved differently on the same flat face.
         const Fx = F[0], Fy = F[1], Fz = F[2];
-        const Vx = normal.y * Fz - normal.z * Fy;
-        const Vy = normal.z * Fx - normal.x * Fz;
-        const Vz = normal.x * Fy - normal.y * Fx;
-        const vl = Math.hypot(Vx, Vy, Vz) || 1;
-        u = ((rx * Fx + ry * Fy + rz * Fz) - F[3]) / md;
-        v = ((rx * Vx + ry * Vy + rz * Vz) / vl - F[4]) / md;
+        const Vx = F[3], Vy = F[4], Vz = F[5];
+        u = ((rx * Fx + ry * Fy + rz * Fz) - F[6]) / md;
+        v = ((rx * Vx + ry * Vy + rz * Vz) - F[7]) / md;
       } else {
         u = (rx * e1x + ry * e1y + rz * e1z) / md;
         v = (rx * e2x + ry * e2y + rz * e2z) / md;

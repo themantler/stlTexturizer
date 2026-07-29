@@ -25,9 +25,12 @@
  *   4. Record the face's minimum extent along U and V — the origin, so the
  *      texture starts at that face's own corner.
  *
- * Output is per CORNER, matching the non-indexed position layout: 6 floats
- * (Ux,Uy,Uz, u0,v0, pad). V is recomputed as N × U by consumers, which keeps the
- * attribute small and guarantees they use the same V.
+ * Output is per CORNER, matching the non-indexed position layout: 8 floats
+ * (Ux,Uy,Uz, Vx,Vy,Vz, u0,v0). BOTH axes are carried. V used to be recomputed by
+ * consumers as (per-vertex normal × U), which made the two texture axes
+ * structurally different — u from a constant per-face axis, v inheriting every
+ * per-vertex normal wobble — so the pattern could be stable in one direction and
+ * not the other.
  *
  * Subdivision only ever adds vertices INSIDE a face, so a coarse mesh and a
  * subdivided one yield identical frames — the attribute does not need threading
@@ -37,6 +40,9 @@
 import { QuantizedPointMap } from './meshIndex.js';
 
 const QUANT = 1e5;
+
+/** Floats per corner in the frame attribute: Ux,Uy,Uz, Vx,Vy,Vz, u0,v0. */
+export const FRAME_STRIDE = 8;
 
 /** Reference frame used only to define which side is bottom/top/left/right. */
 export function referenceFrame(nx, ny, nz) {
@@ -176,7 +182,7 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   const posAttr  = geometry.attributes.position;
   const nCorner  = posAttr.count;
   const triCount = (nCorner / 3) | 0;
-  const out = new Float32Array(nCorner * 6);
+  const out = new Float32Array(nCorner * FRAME_STRIDE);
   if (triCount === 0) return out;
   const sinFlat = Math.sin((flatAngleDeg || 1) * Math.PI / 180);
   const ox = originMin.x, oy = originMin.y, oz = originMin.z;
@@ -378,13 +384,24 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   }
   if (diagOut) for (const d of diagOut) { d.u0 = fu0[d.region]; d.v0 = fv0[d.region]; }
 
+  // V is emitted alongside U rather than left to the consumer. Recomputing it as
+  // (per-vertex normal x U) made the two texture axes structurally different: u
+  // came from a CONSTANT per-face axis while v inherited every wobble of the
+  // per-vertex normal, so one direction of the pattern could be stable while the
+  // other was not — for no reason the face itself can explain. Both axes now come
+  // from the same per-face frame.
   for (let t = 0; t < triCount; t++) {
     const r = regionId[t];
     const Ux = r >= 0 ? fUx[r] : 1, Uy = r >= 0 ? fUy[r] : 0, Uz = r >= 0 ? fUz[r] : 0;
     const u0 = r >= 0 ? fu0[r] : 0, v0 = r >= 0 ? fv0[r] : 0;
+    const nx = r >= 0 ? rNX[r] : 0, ny = r >= 0 ? rNY[r] : 0, nz = r >= 0 ? rNZ[r] : 1;
+    let Vx = ny*Uz - nz*Uy, Vy = nz*Ux - nx*Uz, Vz = nx*Uy - ny*Ux;
+    const vl = Math.hypot(Vx, Vy, Vz) || 1; Vx /= vl; Vy /= vl; Vz /= vl;
     for (let k = 0; k < 3; k++) {
-      const o = (t*3+k)*6;
-      out[o] = Ux; out[o+1] = Uy; out[o+2] = Uz; out[o+3] = u0; out[o+4] = v0; out[o+5] = 0;
+      const o = (t*3+k)*FRAME_STRIDE;
+      out[o]   = Ux; out[o+1] = Uy; out[o+2] = Uz;
+      out[o+3] = Vx; out[o+4] = Vy; out[o+5] = Vz;
+      out[o+6] = u0; out[o+7] = v0;
     }
   }
   return out;

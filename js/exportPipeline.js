@@ -39,7 +39,7 @@ import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
 import { flipCoplanarToDelaunay } from './coplanarFlip.js';
 import { remeshFlatRegions } from './remeshFlat.js';
-import { computeFaceFrames } from './faceFrame.js';
+import { computeFaceFrames, FRAME_STRIDE } from './faceFrame.js';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 
@@ -316,7 +316,7 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     if (settings.mappingMode === 7) {
       const frames = computeFaceFrames(subdivided, settings.flattenAngleDeg ?? 1,
                                        bounds.min, settings.faceEdgeAlign || 'bottom');
-      subdivided.setAttribute('faceFrame', new THREE.BufferAttribute(frames, 6));
+      subdivided.setAttribute('faceFrame', new THREE.BufferAttribute(frames, FRAME_STRIDE));
     }
 
     const subTriCount = subdivided.attributes.position.count / 3;

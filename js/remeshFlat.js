@@ -22,7 +22,7 @@
 
 import { THREE } from './threeCompat.js';
 import { QuantizedPointMap } from './meshIndex.js';
-import { referenceFrame, chooseAlignedDir } from './faceFrame.js';
+import { referenceFrame, chooseAlignedDir, FRAME_STRIDE } from './faceFrame.js';
 
 const QUANT = 1e5;
 
@@ -431,7 +431,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
         let bt = -1, bA = -1;
         for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
         if (bt >= 0) {
-          const o = bt * 18;   // 3 corners * 6 floats
+          const o = bt * 3 * FRAME_STRIDE;
           let ux = frameIn[o], uy = frameIn[o+1], uz = frameIn[o+2];
           const d = ux*Nx + uy*Ny + uz*Nz;   // re-project: normals differ slightly
           ux -= Nx*d; uy -= Ny*d; uz -= Nz*d;
@@ -560,9 +560,9 @@ export function remeshFlatRegions(geometry, opts = {}) {
       let bt = -1, bA = -1;
       for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
       if (bt >= 0) {
-        const o = bt * 18;
-        phU = frameIn[o+3] - ((Ox-omx)*e1x + (Oy-omy)*e1y + (Oz-omz)*e1z);
-        phV = frameIn[o+4] - ((Ox-omx)*e2x + (Oy-omy)*e2y + (Oz-omz)*e2z);
+        const o = bt * 3 * FRAME_STRIDE;
+        phU = frameIn[o+6] - ((Ox-omx)*e1x + (Oy-omy)*e1y + (Oz-omz)*e1z);
+        phV = frameIn[o+7] - ((Ox-omx)*e2x + (Oy-omy)*e2y + (Oz-omz)*e2z);
       }
     } else {
       phU = -(Ox*e1x + Oy*e1y + Oz*e1z);
