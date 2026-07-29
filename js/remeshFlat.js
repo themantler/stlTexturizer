@@ -512,17 +512,14 @@ export function remeshFlatRegions(geometry, opts = {}) {
       }
     }
     const hBoundary = bN ? bSum / bN : Infinity;
+    // h must stay <= hBoundary. Snapping it to a dyadic ladder to make split
+    // pieces share a grid was tried and reverted: rounding to the nearest dyadic
+    // value can COARSEN h by up to sqrt(2), which violates that cap and brings
+    // back the thin-triangle perimeter transition described above — not just at
+    // the seam between pieces but across the whole face. Making pieces share a
+    // grid has to come from a rule that only ever refines.
     const hMax = Math.max(targetLen * LATTICE_FACTOR, 1e-6);
-    const hRaw = Math.max(Math.min(hEquiv, hBoundary, hMax), 1e-6);
-    // Snap the spacing to a dyadic fraction of the resolution bound. A face that
-    // is masked in part, or whose triangles fail the flatness test in a band, is
-    // split into SEVERAL regions here, and each derives its own spacing from its
-    // own input density. Unequal spacings cannot share a grid, so the pieces
-    // interfere where they meet. Dyadic values either match or differ by 2:1, and
-    // a 2:1 lattice still NESTS inside the finer one instead of cutting across
-    // it. Rounding (not flooring) keeps density within sqrt(2) of the tuned
-    // value in both directions rather than doubling it.
-    const h = hMax / Math.pow(2, Math.max(0, Math.round(Math.log2(hMax / hRaw))));
+    const h = Math.max(Math.min(hEquiv, hBoundary, hMax), 1e-6);
     // SQUARE grid, not a triangular/hex one. A triangular lattice has edges only
     // horizontally and at +/-60 degrees — no vertical edges — so on a rectilinear
     // texture the features running along the rows come out crisp while the
