@@ -389,23 +389,51 @@ export function remeshFlatRegions(geometry, opts = {}) {
 
   for (let r = 0; r < regionNX.length; r++) {
     const Nx=regionNX[r],Ny=regionNY[r],Nz=regionNZ[r];
-    // Directed boundary edges (region on the left).
-    const nextV = new Map(); let ok = true; let count = 0;
-    for (const t of regionTris[r]){ if(!ok) break;
+    // Directed boundary edges (region on the left), traversed as EDGES.
+    //
+    // This used to be a vertex -> next-vertex Map, which silently assumes every
+    // boundary vertex has exactly ONE outgoing boundary edge. A vertex has two
+    // wherever the region PINCHES — two lobes of one face meeting at a point, a
+    // mask cut reaching the rim, a hole touching the outer boundary. The old code
+    // treated the second edge as corruption (`ok=false`) and abandoned the WHOLE
+    // region, which then kept its original CAD tessellation while its neighbours
+    // were rebuilt. On the test part that discarded the hip face entirely:
+    // 107.8 sq mm, 19,440 triangles, silently not remeshed, so every lattice fix
+    // bypassed it and its texture kept staircasing along one axis.
+    //
+    // Consuming one directed edge per step handles a pinch correctly: the vertex
+    // is simply visited once per outgoing edge, and the boundary resolves into
+    // however many loops it actually has.
+    const outE = new Map(); let count = 0;
+    for (const t of regionTris[r]){
       const b=t*3, vv=[triV[b],triV[b+1],triV[b+2]];
       for(let e=0;e<3;e++){ const a=vv[e], c=vv[(e+1)%3]; const nb=otherTri(t,a,c);
         if(nb>=0 && regionId[nb]===r) continue;
-        if(nextV.has(a)){ ok=false; break; }
-        nextV.set(a,c); count++;
+        let arr=outE.get(a); if(!arr){ arr=[]; outE.set(a,arr); }
+        arr.push(c); count++;
       }
     }
-    if(!ok || count<3) continue;
-    const loops=[]; const visited=new Set();
-    for(const startV of nextV.keys()){
-      if(visited.has(startV)) continue;
-      const loop=[]; let v=startV; let guard=0; let closed=false;
-      while(guard++<count+2){ if(visited.has(v)){ closed=(v===startV); break; } visited.add(v); loop.push(v); const nx=nextV.get(v); if(nx===undefined) break; v=nx; }
-      if(closed && loop.length>=3) loops.push(loop);
+    if(count<3) {
+      if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+        let a=0; for(const t of regionTris[r]) a+=tArea[t];
+        console.log(`[remesh] region ${r} SKIPPED (count=${count}) area=${a.toFixed(1)} tris=${regionTris[r].length}`);
+      }
+      continue;
+    }
+    const loops=[];
+    for(const startV of [...outE.keys()]){
+      while((outE.get(startV)||[]).length){
+        const loop=[]; let v=startV; let guard=0; let closed=false;
+        while(guard++<count+2){
+          const arr=outE.get(v);
+          if(!arr || !arr.length) break;
+          loop.push(v);
+          v=arr.shift();                 // consume this directed edge
+          if(v===startV){ closed=true; break; }
+        }
+        if(closed && loop.length>=3) loops.push(loop);
+        if(!closed) break;               // open chain: stop walking from here
+      }
     }
     if(loops.length===0) continue;
 
@@ -618,6 +646,14 @@ export function remeshFlatRegions(geometry, opts = {}) {
       }
     }
 
+    if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+      const nLat = pts2d.length - (loops2d.reduce((a,l)=>a+l.length,0));
+      console.log(`[remesh] region ${r} area=${regArea.toFixed(1)} h=${h.toFixed(4)} ` +
+        `rowH=${rowH.toFixed(4)} latticePts=${nLat} boundaryPts=${pts2d.length-nLat} ` +
+        `e1=[${e1x.toFixed(3)},${e1y.toFixed(3)},${e1z.toFixed(3)}] ` +
+        `e2=[${e2x.toFixed(3)},${e2y.toFixed(3)},${e2z.toFixed(3)}] ` +
+        `hEquiv=${hEquiv.toFixed(4)} hBoundary=${hBoundary.toFixed(4)} hMax=${hMax.toFixed(4)} hBand=${hBand.toFixed(4)}`);
+    }
     let tris;
     try { tris = cdt2d(pts2d, segs, inDom); } catch(e) { tris=null; }
     if(!tris || tris.length===0) continue;
