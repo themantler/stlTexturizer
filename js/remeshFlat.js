@@ -272,6 +272,8 @@ const LATTICE_FACTOR = 0.4;
 // coarser than the flip path on real CAD parts (356k vs 1.46M triangles), which
 // read as a "smudged"/over-blurred texture. Parity with the mesh the remesh
 // receives is the right target — same sampling density, uniform orientation.
+const BAND_RATIO = 0.135;      // h <= BAND_RATIO * area/perimeter (see below)
+const BAND_MAX_REFINE = 2;    // ...but never finer than hMax/2, to bound the cost
 const DENSITY_TEMPER = 1.0;
 
 export function remeshFlatRegions(geometry, opts = {}) {
@@ -523,7 +525,30 @@ export function remeshFlatRegions(geometry, opts = {}) {
     // the seam between pieces but across the whole face. Making pieces share a
     // grid has to come from a rule that only ever refines.
     const hMax = Math.max(targetLen * LATTICE_FACTOR, 1e-6);
-    const h = Math.max(Math.min(hEquiv, hBoundary, hMax), 1e-6);
+    // Cap h so the OFF-GRID BAND stays a constant share of every face.
+    //
+    // Boundary vertices are shared with neighbouring faces, so they cannot be
+    // moved onto the lattice; each one sits off-grid and drags its incident
+    // triangles with it. That band is a strip of width ~h around the perimeter,
+    // so the share of a face it spoils goes as (perimeter * h) / area. On a real
+    // part that ratio doubled between large faces and small ones (0.22 vs 0.43),
+    // and the measured off-grid triangle share doubled with it (10% vs 19%) —
+    // matching exactly which faces read as clean and which read as ragged. It is
+    // NOT about an edge being slanted: large faces with slanted edges were fine.
+    //
+    // Measured off-grid share tracks 0.74 * h * perimeter / area across faces
+    // (ratio 0.77/0.74/0.69/0.75), so holding h * perimeter / area constant
+    // holds the artifact constant. BAND_RATIO is set to leave large faces where
+    // they already are and refine only the small ones, which are cheap.
+    // Floored at hMax/BAND_MAX_REFINE: a long thin region has a tiny
+    // area/perimeter, and without a floor its spacing collapses and the triangle
+    // count explodes. On this part an unfloored cap did not finish in 10 minutes.
+    // The floor bounds the worst case to BAND_MAX_REFINE^2 times the triangles a
+    // region would otherwise get, and it is a floor on REFINEMENT only, so the
+    // hBoundary cap is still respected.
+    const perim = bSum || Infinity;
+    const hBand = Math.max(BAND_RATIO * (regArea / perim), hMax / BAND_MAX_REFINE);
+    const h = Math.max(Math.min(hEquiv, hBoundary, hMax, hBand), 1e-6);
     // SQUARE grid, not a triangular/hex one. A triangular lattice has edges only
     // horizontally and at +/-60 degrees — no vertical edges — so on a rectilinear
     // texture the features running along the rows come out crisp while the
