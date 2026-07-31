@@ -288,6 +288,74 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
     for (let k = 0; k < 3; k++) { const r = vertRegion[triV[b+k]]; if (r >= 0) { regionId[t] = r; break; } }
   }
 
+  // Slivers left over from CAD tessellation form their own MICRO-REGIONS inside
+  // an otherwise flat face — their normals differ just enough to fail the
+  // flatness test. Each would then get its own frame, and above all its own
+  // ORIGIN, so the texture jumps across that one triangle and displacement
+  // spikes there. It shows as speckled tears scattered over a face.
+  //
+  // The remeshed path never shows it because it replaces a face's interior
+  // outright, leaving one region. The Delaunay flip path only RECONNECTS the
+  // existing vertices, so every CAD sliver survives and keeps its micro-region —
+  // which is why the spikes appeared there and not under remesh.
+  //
+  // A sliver has no meaningful edge to align to anyway, so give it its
+  // neighbour's frame: reassign any small region to its largest near-coplanar
+  // neighbour. Genuine small faces (a chamfer, a step) have normals far from
+  // their neighbours' and are left alone.
+  if (!(typeof process !== 'undefined' && process.env && process.env.NO_SLIVER_MERGE)) {
+    const rArea = new Float64Array(rNX.length);
+    for (let t = 0; t < triCount; t++) if (regionId[t] >= 0) rArea[regionId[t]] += tArea[t];
+    // adjacency: for each region, the largest near-coplanar neighbour
+    const bestNb = new Int32Array(rNX.length).fill(-1);
+    const bestA  = new Float64Array(rNX.length);
+    const COS_MERGE = Math.cos(20 * Math.PI / 180);
+    for (let t = 0; t < triCount; t++) {
+      const r = regionId[t]; if (r < 0) continue;
+      const b = t*3, vv = [triV[b], triV[b+1], triV[b+2]];
+      for (let e = 0; e < 3; e++) {
+        const nb = otherTri(t, vv[e], vv[(e+1)%3]);
+        if (nb < 0) continue;
+        const r2 = regionId[nb];
+        if (r2 < 0 || r2 === r) continue;
+        if (rNX[r]*rNX[r2] + rNY[r]*rNY[r2] + rNZ[r]*rNZ[r2] < COS_MERGE) continue;
+        if (rArea[r2] > bestA[r]) { bestA[r] = rArea[r2]; bestNb[r] = r2; }
+      }
+    }
+    const remap = new Int32Array(rNX.length);
+    for (let r = 0; r < rNX.length; r++) remap[r] = r;
+    const order2 = Array.from({length: rNX.length}, (_, r) => r)
+      .sort((a, b) => rArea[a] - rArea[b]);
+    for (const r of order2) {
+      const nb = bestNb[r];
+      if (nb < 0) continue;
+      if (rArea[nb] < rArea[r] * 20) continue;    // only absorb into a much larger face
+      let root = nb, guard = 0;
+      while (remap[root] !== root && guard++ < 64) root = remap[root];
+      if (root !== r) remap[r] = root;
+    }
+    let merged = 0;
+    for (let t = 0; t < triCount; t++) {
+      const r = regionId[t]; if (r < 0) continue;
+      let root = r, guard = 0;
+      while (remap[root] !== root && guard++ < 64) root = remap[root];
+      if (root !== r) { regionId[t] = root; merged++; }
+    }
+    if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+      console.log(`[faceFrame] merged ${merged} sliver triangles into larger coplanar faces`);
+    }
+  }
+
+  if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+    let un = 0; for (let t = 0; t < triCount; t++) if (regionId[t] < 0) un++;
+    const ra = new Float64Array(rNX.length);
+    for (let t = 0; t < triCount; t++) if (regionId[t] >= 0) ra[regionId[t]] += tArea[t];
+    const sorted = [...ra].sort((a,b)=>b-a);
+    const tiny = sorted.filter(a=>a<0.01).length, small = sorted.filter(a=>a<0.5).length;
+    console.log(`[faceFrame] ${triCount} tris, ${rNX.length} regions, ${un} unassigned; ` +
+      `areas: largest ${sorted[0].toFixed(1)}, <0.5mm2 ${small}, <0.01mm2 ${tiny}`);
+  }
+
   const nR = rNX.length;
   if (nR === 0) return out;
 
