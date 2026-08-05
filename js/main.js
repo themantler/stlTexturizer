@@ -4672,8 +4672,28 @@ async function toggleDisplacementPreview(enable) {
  * Builds per-non-indexed-vertex weights (1.0 = excluded from subdivision/displacement)
  * that combine the user-painted exclusion set AND the top/bottom angle mask.
  */
-function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings) {
+function buildCombinedFaceWeights(geometry, excludedFaces, invert, settings, maskOffset = 0) {
   const weights = buildFaceWeights(geometry, excludedFaces, invert);
+
+  // Bake mask: faces already carrying baked-in displacement are never textured
+  // again while the option is on. Applied HERE, on top of whatever the selection
+  // resolved to, so it holds in include-only mode as well — previously the mask
+  // was the seeded excludedFaces Set itself, which meant it only worked in
+  // exclude mode and forced the UI back to that mode after every bake.
+  // _displacedFaces is cumulative across bakes and indexed by triangle, so this
+  // is an O(1) test per face rather than a lookup in a Set of millions.
+  // maskOffset locates this geometry inside the whole-mesh triangle numbering,
+  // so a per-BODY slice consults the same cumulative mask. Without it the mask
+  // silently did nothing on multi-body parts, which is where it matters most.
+  const _mTri = geometry.attributes.position.count / 3;
+  if (bakeMaskChk && bakeMaskChk.checked && _displacedFaces
+      && _displacedFaces.length >= maskOffset + _mTri) {
+    for (let t = 0; t < _mTri; t++) {
+      if (_displacedFaces[maskOffset + t]) {
+        weights[t * 3] = 1.0; weights[t * 3 + 1] = 1.0; weights[t * 3 + 2] = 1.0;
+      }
+    }
+  }
 
   const hasAngleMask = settings.bottomAngleLimit > 0 || settings.topAngleLimit > 0;
   if (!hasAngleMask) return weights;
@@ -4886,7 +4906,7 @@ async function handleExport(format = 'stl') {
             // Apply displacement to new painted faces only
             const faceWeights = buildCombinedFaceWeights(slicedGeo, newPaintedLocal, true, {
               ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
-            });
+            }, startTri || 0);
             const _isRotated = _cumulativeRotation &&
               Math.abs(_cumulativeRotation.x) + Math.abs(_cumulativeRotation.y) +
               Math.abs(_cumulativeRotation.z) > 1e-6;
@@ -4945,7 +4965,8 @@ async function handleExport(format = 'stl') {
 
             const hasAngleMask = settings.bottomAngleLimit > 0 || settings.topAngleLimit > 0;
             const faceWeights  = (bodyExcludedLocal.size > 0 || selectionMode || hasAngleMask)
-              ? buildCombinedFaceWeights(bodyGeo, bodyExcludedLocal, selectionMode, settings)
+              ? buildCombinedFaceWeights(bodyGeo, bodyExcludedLocal, selectionMode, settings,
+                                          body.startTri || 0)
               : null;
 
             // Clone and rotate body geometry into the same space as currentGeometry
@@ -5507,11 +5528,12 @@ async function bakeTextures() {
     const wasParentExcluded = faceWeights
       ? (parentIdx) => faceWeights[parentIdx * 3] > 0.99
       : () => false;
-    // Not built any more: adoptBakedGeometry now starts in include-only mode with
-    // an empty selection, so nothing consumes this list. Building it meant a pass
-    // over every post-bake triangle plus an array of millions, purely to be
-    // discarded. Left here rather than deleted because the bake-mask checkbox
-    // still exists in the UI and this is where it would hook back in.
+    // The bake mask is no longer carried as a seeded excludedFaces Set. It rides
+    // on _displacedFaces instead — see buildCombinedFaceWeights. That set already
+    // accumulates every face textured by THIS bake and all earlier ones, is a
+    // Uint8Array rather than a Set of millions, and is independent of which
+    // selection mode the user is in. Seeding a Set meant the mask could only
+    // exist in exclude mode, since include-only inverts its meaning.
     const preExcluded = null;
     void wasParentExcluded;
 
@@ -5650,11 +5672,11 @@ async function bakeTextures() {
           // Use selection mode (include only painted faces)
           bodyFaceWeights = buildCombinedFaceWeights(bodyGeo, bodyPaintedLocal, true, {
             ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
-          });
+          }, body.startTri || 0);
         } else if (bodyExcluded.size > 0) {
           bodyFaceWeights = buildCombinedFaceWeights(bodyGeo, bodyExcluded, false, {
             ...settings, bottomAngleLimit: 0, topAngleLimit: 0,
-          });
+          }, body.startTri || 0);
         }
         let bodyDisplaced = null, bodyGeoForBake = null;
         try {
@@ -5846,11 +5868,10 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   // the post-bake UI feel heavy.
   //
   // Include-only starting empty costs nothing and matches how the tool is
-  // actually used between bakes: pick the next faces to texture. The trade is
-  // that the automatic "never re-texture what was already baked" guard is gone,
-  // because that guard WAS the seeded set. Selecting an already-baked face will
-  // texture it a second time; the mode makes that an explicit choice rather than
-  // something the mask prevents silently.
+  // actually used between bakes: pick the next faces to texture. The
+  // "never re-texture what was already baked" guard is unaffected — it moved off
+  // this Set and onto _displacedFaces, applied in buildCombinedFaceWeights, so it
+  // holds in either selection mode while the bake-mask option is on.
   if (!selectionMode) setSelectionMode(true);
 
   // Empty selection; exit any active painting/place/rotate modes.
