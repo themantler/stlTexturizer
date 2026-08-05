@@ -5507,13 +5507,13 @@ async function bakeTextures() {
     const wasParentExcluded = faceWeights
       ? (parentIdx) => faceWeights[parentIdx * 3] > 0.99
       : () => false;
-    let preExcluded = null;
-    if (bakeMaskChk.checked) {
-      preExcluded = [];
-      for (let i = 0; i < faceParentId.length; i++) {
-        if (!wasParentExcluded(faceParentId[i])) preExcluded.push(i);
-      }
-    }
+    // Not built any more: adoptBakedGeometry now starts in include-only mode with
+    // an empty selection, so nothing consumes this list. Building it meant a pass
+    // over every post-bake triangle plus an array of millions, purely to be
+    // discarded. Left here rather than deleted because the bake-mask checkbox
+    // still exists in the UI and this is where it would hook back in.
+    const preExcluded = null;
+    void wasParentExcluded;
 
     // Track which post-bake triangles carry baked-in displacement (this bake's
     // freshly displaced faces plus earlier ones remapped through the parent
@@ -5837,15 +5837,24 @@ function adoptBakedGeometry(geometry, bounds, opts = {}) {
   lastAdvancedDiag = null;
   clearDiagHighlight();
 
-  // The seeded mask carries exclude-mode semantics ("don't re-texture these
-  // faces"). If the user was in include-only mode pre-bake, that mode would
-  // invert the meaning to "only texture these faces" — exactly backwards. So
-  // force exclude mode before seeding. setSelectionMode also clears
-  // excludedFaces as a side effect, which is fine — we re-seed below.
-  if (selectionMode) setSelectionMode(false);
+  // Default to INCLUDE-ONLY with an empty selection after a bake.
+  //
+  // This used to force exclude mode and seed the mask with every triangle that
+  // had just been textured. On a multi-body part at working resolution that is a
+  // Set of millions of indices — expensive to build and expensive for every
+  // subsequent paint, hit-test and weight build to consult, which is what made
+  // the post-bake UI feel heavy.
+  //
+  // Include-only starting empty costs nothing and matches how the tool is
+  // actually used between bakes: pick the next faces to texture. The trade is
+  // that the automatic "never re-texture what was already baked" guard is gone,
+  // because that guard WAS the seeded set. Selecting an already-baked face will
+  // texture it a second time; the mode makes that an explicit choice rather than
+  // something the mask prevents silently.
+  if (!selectionMode) setSelectionMode(true);
 
-  // Seed exclusion mask, exit any active painting/place/rotate modes.
-  excludedFaces = new Set(opts.preExcludedFaces || []);
+  // Empty selection; exit any active painting/place/rotate modes.
+  excludedFaces = new Set();
   precisionExcludedFaces = new Set();
   exclusionTool = null;
   eraseMode     = false;
