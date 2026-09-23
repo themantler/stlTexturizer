@@ -4767,7 +4767,20 @@ function _restoreOriginalPose(positions, normals = null) {
   }
 }
 
+// Stage markers for export. The renderer going white leaves no error behind, so
+// the only way to see how far an export got is to log progress as it goes; open
+// DevTools BEFORE exporting and the trail survives.
+let _xt0 = 0;
+function exportMark(label, extra = '') {
+  const m = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
+  const heap = m ? ` heap=${(m.usedJSHeapSize/1048576).toFixed(0)}/${(m.jsHeapSizeLimit/1048576).toFixed(0)}MB` : '';
+  const dt = _xt0 ? ` +${((performance.now()-_xt0)/1000).toFixed(1)}s` : '';
+  console.log(`%c[export] ${label}${dt}${heap}${extra ? '  ' + extra : ''}`, 'color:#c60');
+}
+
 async function handleExport(format = 'stl') {
+  _xt0 = performance.now();
+  exportMark('start', `format=${format}`);
   if (!currentGeometry || !activeMapEntry || isExporting || isBaking) return;
   const myToken = ++exportToken;
   isExporting = true;
@@ -5097,7 +5110,14 @@ async function handleExport(format = 'stl') {
       if (exportToken !== myToken) return;
 
       const orderedResults = bodyResults.filter(Boolean);
-      export3MF(orderedResults, `${_exportBaseName()}.3mf`);
+      let _tot = 0;
+      for (const r of orderedResults) _tot += r.geometry.attributes.position.count / 3;
+      exportMark('write3mf:start', `bodies=${orderedResults.length} tris=${_tot.toLocaleString()}`);
+      // AWAITED. This used to be fire-and-forget, so anything that threw inside
+      // it became an unhandled rejection and the export simply stopped with no
+      // message — indistinguishable from a hang.
+      await export3MF(orderedResults, `${_exportBaseName()}.3mf`);
+      exportMark('write3mf:done');
 
       for (const r of orderedResults) r.geometry.dispose();
 

@@ -44,7 +44,7 @@ import { computeFaceFrames } from './faceFrame.js';
 // Bump when changing pipeline behaviour. Printed in the summary line below so
 // "did my change actually load?" is answerable from the console instead of
 // inferred from the output.
-const BUILD_TAG = 'band-cap';
+const BUILD_TAG = 'stream-export';
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
 

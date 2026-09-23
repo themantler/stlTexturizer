@@ -130,6 +130,7 @@ function emitObjectXml(emitter, geometry, objectId, name, colorGroupId=null, col
   // displacement pipeline. The pipeline snaps coordinates onto this exact
   // grid in resolveTJunctions before export, so welding here only merges
   // bit-identical (or grid-identical) points.
+  const _m0 = (typeof performance !== 'undefined' && performance.memory) ? performance.memory.usedJSHeapSize : 0;
   const indexMap  = new QuantizedPointMap(1e4, Math.min(triCount * 3, 1 << 22));
   const uniqueXYZ = [];   // flat [x,y,z,x,y,z,...]
   const triIdx    = new Uint32Array(triCount * 3);
@@ -149,6 +150,13 @@ function emitObjectXml(emitter, geometry, objectId, name, colorGroupId=null, col
   }
 
   const vertCount = uniqueXYZ.length / 3;
+  if (typeof console !== 'undefined') {
+    const m = (typeof performance !== 'undefined' && performance.memory) ? performance.memory : null;
+    console.log(`%c[export] object ${objectId}: ${triCount.toLocaleString()} tris, ` +
+      `${vertCount.toLocaleString()} unique verts` +
+      (m ? `, heap=${(m.usedJSHeapSize/1048576).toFixed(0)}MB (+${((m.usedJSHeapSize-_m0)/1048576).toFixed(0)}MB dedup)` : ''),
+      'color:#c60');
+  }
   const namePart = name ? ` name="${escapeXml(name)}"` : '';
   const colorPart = (colorGroupId !== null && colorIndex !== null)
     ? ` pid="${colorGroupId}" pindex="${colorIndex}"`
