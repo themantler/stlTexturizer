@@ -110,8 +110,12 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
   // A face's user-exclusion flag = average of its 3 vertex weights > 0.99.
   const ewAttr = geometry.attributes.excludeWeight || null;
   // Per-face frame (U axis + origin) for Face-aligned mode — see faceFrame.js.
-  const _ffAttr = geometry.attributes.faceFrame || null;
-  const _ff = _ffAttr ? new Float64Array(8) : null;
+  // {index, table} from faceFrame.js: one region index per TRIANGLE and one
+  // 8-float frame per region, rather than a copy of the frame on every corner.
+  const _ffSrc = (geometry.userData && geometry.userData.faceFrame) || null;
+  const _ffIdx = _ffSrc ? _ffSrc.index : null;
+  const _ffTab = _ffSrc ? _ffSrc.table : null;
+  const _ff = _ffSrc ? new Float64Array(8) : null;
   // Per-face user-exclusion flag: stored separately from maskedFrac so that
   // user-excluded faces do NOT bleed reduced displacement into adjacent faces
   // via shared vertices (maskedFrac is only for angle-based blending).
@@ -520,10 +524,10 @@ export function applyDisplacement(geometry, imageData, imgWidth, imgHeight, sett
     // no-op there. Displacement direction (Pass 3) stays on the unsmoothed
     // smooth normal — only blend weights change here.
     if (settings.mappingMode === 7) {
-      if (_ffAttr) {
-        const o = i * 8, a = _ffAttr.array;
-        _ff[0]=a[o];   _ff[1]=a[o+1]; _ff[2]=a[o+2]; _ff[3]=a[o+3];
-        _ff[4]=a[o+4]; _ff[5]=a[o+5]; _ff[6]=a[o+6]; _ff[7]=a[o+7];
+      if (_ffTab) {
+        const o = _ffIdx[(i / 3) | 0] * 8;
+        _ff[0]=_ffTab[o];   _ff[1]=_ffTab[o+1]; _ff[2]=_ffTab[o+2]; _ff[3]=_ffTab[o+3];
+        _ff[4]=_ffTab[o+4]; _ff[5]=_ffTab[o+5]; _ff[6]=_ffTab[o+6]; _ff[7]=_ffTab[o+7];
         settingsWithAspect._faceFrame = _ff;
       }
       // Face-aligned: face-stable normal (see domNrm above), matching the

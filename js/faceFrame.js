@@ -25,8 +25,8 @@
  *   4. Record the face's minimum extent along U and V — the origin, so the
  *      texture starts at that face's own corner.
  *
- * Output is per CORNER, matching the non-indexed position layout: 8 floats
- * (Ux,Uy,Uz, Vx,Vy,Vz, u0,v0). BOTH axes are carried. V used to be recomputed by
+ * Output is { index, table }: one Int32 region index per TRIANGLE, and one
+ * 8-float frame per region (Ux,Uy,Uz, Vx,Vy,Vz, u0,v0). BOTH axes are carried. V used to be recomputed by
  * consumers as (per-vertex normal × U), which made the two texture axes
  * structurally different — u from a constant per-face axis, v inheriting every
  * per-vertex normal wobble — so the pattern could be stable in one direction and
@@ -182,8 +182,8 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   const posAttr  = geometry.attributes.position;
   const nCorner  = posAttr.count;
   const triCount = (nCorner / 3) | 0;
-  const out = new Float32Array(nCorner * FRAME_STRIDE);
-  if (triCount === 0) return out;
+  const EMPTY = { index: new Int32Array(0), table: fallbackTable() };
+  if (triCount === 0) return EMPTY;
   const sinFlat = Math.sin((flatAngleDeg || 1) * Math.PI / 180);
   const ox = originMin.x, oy = originMin.y, oz = originMin.z;
 
@@ -357,7 +357,7 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   }
 
   const nR = rNX.length;
-  if (nR === 0) return out;
+  if (nR === 0) return { index: new Int32Array(triCount), table: fallbackTable() };
 
   // Boundary edges per region (an edge whose two triangles disagree on region).
   const bEdges = Array.from({ length: nR }, () => []);
@@ -458,19 +458,47 @@ export function computeFaceFrames(geometry, flatAngleDeg, originMin, side = 'bot
   // per-vertex normal, so one direction of the pattern could be stable while the
   // other was not — for no reason the face itself can explain. Both axes now come
   // from the same per-face frame.
-  for (let t = 0; t < triCount; t++) {
-    const r = regionId[t];
-    const Ux = r >= 0 ? fUx[r] : 1, Uy = r >= 0 ? fUy[r] : 0, Uz = r >= 0 ? fUz[r] : 0;
-    const u0 = r >= 0 ? fu0[r] : 0, v0 = r >= 0 ? fv0[r] : 0;
-    const nx = r >= 0 ? rNX[r] : 0, ny = r >= 0 ? rNY[r] : 0, nz = r >= 0 ? rNZ[r] : 1;
+  // Emitted as a per-REGION table plus a per-TRIANGLE index, not a per-corner
+  // copy of the frame.
+  //
+  // The frame is constant across a region, so writing all 8 floats to all three
+  // corners of every triangle replicated the same values 24 times per triangle:
+  // 96 bytes per triangle, measured at 334MB on a 3.6-million-triangle mesh, and
+  // the pipeline builds one of these per bake for the lattice and another for the
+  // UVs. That allocation did not exist before this module, and it is what made
+  // the renderer fall over on high-triangle work. Table plus index is 4 bytes per
+  // triangle: the same data, 24x smaller.
+  const table = new Float32Array((nR + 1) * FRAME_STRIDE);
+  const FALLBACK = nR;                       // last slot: triangles with no region
+  for (let r = 0; r < nR; r++) {
+    const o = r * FRAME_STRIDE;
+    const Ux = fUx[r], Uy = fUy[r], Uz = fUz[r];
+    const nx = rNX[r], ny = rNY[r], nz = rNZ[r];
     let Vx = ny*Uz - nz*Uy, Vy = nz*Ux - nx*Uz, Vz = nx*Uy - ny*Ux;
     const vl = Math.hypot(Vx, Vy, Vz) || 1; Vx /= vl; Vy /= vl; Vz /= vl;
-    for (let k = 0; k < 3; k++) {
-      const o = (t*3+k)*FRAME_STRIDE;
-      out[o]   = Ux; out[o+1] = Uy; out[o+2] = Uz;
-      out[o+3] = Vx; out[o+4] = Vy; out[o+5] = Vz;
-      out[o+6] = u0; out[o+7] = v0;
-    }
+    table[o]   = Ux; table[o+1] = Uy; table[o+2] = Uz;
+    table[o+3] = Vx; table[o+4] = Vy; table[o+5] = Vz;
+    table[o+6] = fu0[r]; table[o+7] = fv0[r];
   }
-  return out;
+  writeFallback(table, FALLBACK * FRAME_STRIDE);
+
+  const index = new Int32Array(triCount);
+  for (let t = 0; t < triCount; t++) {
+    const r = regionId[t];
+    index[t] = r >= 0 ? r : FALLBACK;
+  }
+  return { index, table };
+}
+
+// Frame used by triangles that belong to no region: U = +X, V = +Y, origin 0.
+// Matches what the per-corner layout wrote for regionId < 0.
+function writeFallback(table, o) {
+  table[o]   = 1; table[o+1] = 0; table[o+2] = 0;
+  table[o+3] = 0; table[o+4] = 1; table[o+5] = 0;
+  table[o+6] = 0; table[o+7] = 0;
+}
+function fallbackTable() {
+  const t = new Float32Array(FRAME_STRIDE);
+  writeFallback(t, 0);
+  return t;
 }

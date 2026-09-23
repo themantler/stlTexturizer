@@ -39,7 +39,7 @@ import { decimate } from './decimation.js';
 import { resolveTJunctions, countEdgeDefects, countAreaSlivers } from './meshRepair.js';
 import { flipCoplanarToDelaunay } from './coplanarFlip.js';
 import { remeshFlatRegions } from './remeshFlat.js';
-import { computeFaceFrames, FRAME_STRIDE } from './faceFrame.js';
+import { computeFaceFrames } from './faceFrame.js';
 
 // Bump when changing pipeline behaviour. Printed in the summary line below so
 // "did my change actually load?" is answerable from the console instead of
@@ -319,9 +319,12 @@ export async function runExportPipeline(input, onEvent = () => {}, shouldAbort =
     // Computed on the mesh displacement is about to consume; subdivision only
     // adds vertices inside a face so these match the coarse mesh's frames.
     if (settings.mappingMode === 7) {
-      const frames = computeFaceFrames(subdivided, settings.flattenAngleDeg ?? 1,
-                                       bounds.min, settings.faceEdgeAlign || 'bottom');
-      subdivided.setAttribute('faceFrame', new THREE.BufferAttribute(frames, FRAME_STRIDE));
+      // Carried on userData, not as a vertex attribute: it is {index, table},
+      // consumed by applyDisplacement on the very next line, and never uploaded
+      // to the GPU or threaded through another stage.
+      subdivided.userData.faceFrame =
+        computeFaceFrames(subdivided, settings.flattenAngleDeg ?? 1,
+                          bounds.min, settings.faceEdgeAlign || 'bottom');
     }
 
     const subTriCount = subdivided.attributes.position.count / 3;

@@ -541,8 +541,8 @@ export function remeshFlatRegions(geometry, opts = {}) {
         let bt = -1, bA = -1;
         for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
         if (bt >= 0) {
-          const o = bt * 3 * FRAME_STRIDE;
-          let ux = frameIn[o], uy = frameIn[o+1], uz = frameIn[o+2];
+          const o = frameIn.index[bt] * FRAME_STRIDE;
+          let ux = frameIn.table[o], uy = frameIn.table[o+1], uz = frameIn.table[o+2];
           const d = ux*Nx + uy*Ny + uz*Nz;   // re-project: normals differ slightly
           ux -= Nx*d; uy -= Ny*d; uz -= Nz*d;
           const l = Math.hypot(ux, uy, uz);
@@ -693,9 +693,9 @@ export function remeshFlatRegions(geometry, opts = {}) {
       let bt = -1, bA = -1;
       for (const t of regionTris[r]) if (tArea[t] > bA) { bA = tArea[t]; bt = t; }
       if (bt >= 0) {
-        const o = bt * 3 * FRAME_STRIDE;
-        phU = frameIn[o+6] - ((Ox-omx)*e1x + (Oy-omy)*e1y + (Oz-omz)*e1z);
-        phV = frameIn[o+7] - ((Ox-omx)*e2x + (Oy-omy)*e2y + (Oz-omz)*e2z);
+        const o = frameIn.index[bt] * FRAME_STRIDE;
+        phU = frameIn.table[o+6] - ((Ox-omx)*e1x + (Oy-omy)*e1y + (Oz-omz)*e1z);
+        phV = frameIn.table[o+7] - ((Ox-omx)*e2x + (Oy-omy)*e2y + (Oz-omz)*e2z);
       }
     } else {
       phU = -(Ox*e1x + Oy*e1y + Oz*e1z);
