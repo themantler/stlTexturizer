@@ -4848,6 +4848,8 @@ async function handleExport(format = 'stl') {
         const bodyGeo = body.geometry;
 
         if (!bodyGeo || bodyGeo.attributes.position.array.length === 0) return;
+        exportMark(`body ${bi}/${bodies.length}`,
+                   `tris=${(bodyGeo.attributes.position.count/3)|0}`);
 
         let bodyFinal = null;
         try {
@@ -5075,14 +5077,45 @@ async function handleExport(format = 'stl') {
       // subdivided size), and hardwareConcurrency bounds it on many-body
       // models. Anything below 2 workers (or a failed pool boot) falls back
       // to the sequential shared-worker path.
+      exportMark('bodies', `count=${bodies.length}`);
+      // Concurrency is bounded by the RENDERER'S JS HEAP, not by system RAM.
+      //
+      // Each in-flight body sends its displaced positions+normals back here, so
+      // N concurrent bodies hold N of those in this process at once. The old
+      // sizing keyed off total machine memory — 8 workers on a 64GB+ box — but a
+      // renderer gets roughly 4GB of heap however much RAM the machine has.
+      // Eight large bodies in flight then exceeded it and Chromium killed the
+      // renderer: the window goes white and DevTools reports it disconnected,
+      // with no error and no out-of-memory message anywhere.
+      //
+      // Budget from the heap limit instead, using the same ~145 B/tri estimate
+      // for a body's peak that the old comment quoted, doubled because the
+      // result is briefly live alongside the geometry built from it.
       const memGB = (window.electronAPI && window.electronAPI.totalMemoryGB) || 0;
       const hw    = navigator.hardwareConcurrency || 4;
+      const heapLimit = (typeof performance !== 'undefined' && performance.memory
+        && performance.memory.jsHeapSizeLimit) || (4 * 1024 * 1024 * 1024);
+      let biggestTris = 0;
+      for (const b of bodies) {
+        if (!b.geometry || !b.geometry.attributes.position) continue;
+        const n = b.geometry.attributes.position.count / 3;
+        if (n > biggestTris) biggestTris = n;
+      }
+      // subdivision multiplies triangle count; refineLength drives how much, so
+      // this is an estimate, not a guarantee. Kept deliberately pessimistic.
+      const estPerBody = Math.max(1, biggestTris) * 145 * 2;
+      const byHeap = Math.max(1, Math.floor((heapLimit * 0.45) / estPerBody));
       const poolTarget = Math.min(
         bodies.length,
-        memGB >= 64 ? Math.min(8, hw) : memGB >= 32 ? Math.min(4, hw) : 2
+        memGB >= 64 ? Math.min(8, hw) : memGB >= 32 ? Math.min(4, hw) : 2,
+        byHeap
       );
+      exportMark('pool-budget',
+        `heapLimit=${(heapLimit/1048576).toFixed(0)}MB biggestBody=${biggestTris.toLocaleString()}tris ` +
+        `estPerBody=${(estPerBody/1048576).toFixed(0)}MB byHeap=${byHeap}`);
       let pool = [];
       if (poolTarget > 1) pool = await _createPipelineWorkerPool(poolTarget);
+      exportMark('pool', `target=${poolTarget} booted=${pool.length}`);
 
       try {
         if (pool.length > 1) {
