@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { zipSync, strToU8 } from 'fflate';
+import { zipSync, strToU8, Zip, ZipDeflate } from 'fflate';
 import { QuantizedPointMap } from './meshIndex.js';
 
 async function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
@@ -189,9 +189,10 @@ function buildTransformAttr(matrix, centerOffset) {
 
 // ── 3MF XML builder ───────────────────────────────────────────────────────────
 
-function buildModelXmlBytes(bodyResultsOrGeometry) {
-  const emitter = makeEmitter();
-  const { emit, finish } = emitter;
+// Emits the model XML through `emitter.emit`. Split out from buildModelXmlBytes
+// so export can stream it straight into the zip instead of materialising it.
+function emitModelXml(emitter, bodyResultsOrGeometry) {
+  const { emit } = emitter;
   emit(
     '<?xml version="1.0" encoding="UTF-8"?>\n'+
     '<model unit="millimeter" xml:lang="en-US" '+
@@ -265,18 +266,61 @@ export function build3MFBytes(bodyResultsOrGeometry) {
   }, { level: 0 });
 }
 
+// Streams the model XML straight into the zip entry, so the full XML never
+// exists as a buffer.
+//
+// The model XML runs about 150-190 bytes per triangle, and the old path held it
+// TWICE at once: makeEmitter().finish() copies every chunk into one contiguous
+// Uint8Array while still holding the chunks. Measured on a 2-million-triangle
+// export that is 354MB of XML and a 708MB peak before zipping even starts; the
+// triangle budget allows far more than that, and this pass is the one users run
+// last and largest. Deflating incrementally keeps only the ~1MB pending chunk
+// and the compressed output alive — the zipped result was 92MB where the XML
+// was 354MB.
+function zip3MFStreaming(bodyResultsOrGeometry) {
+  return new Promise((resolve, reject) => {
+    const parts = [];
+    let total = 0;
+    const zip = new Zip((err, chunk, final) => {
+      if (err) { reject(err); return; }
+      if (chunk) { parts.push(chunk); total += chunk.length; }
+      if (final) {
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (let i = 0; i < parts.length; i++) {
+          out.set(parts[i], off); off += parts[i].length;
+          parts[i] = null;               // let each piece go as it is copied
+        }
+        resolve(out);
+      }
+    });
+    try {
+      const addSmall = (name, str) => {
+        const f = new ZipDeflate(name, { level: 5 });
+        zip.add(f);
+        f.push(strToU8(str), true);
+      };
+      addSmall('[Content_Types].xml', CONTENT_TYPES_XML);
+      addSmall('_rels/.rels', RELS_XML);
+
+      const model = new ZipDeflate('3D/3dmodel.model', { level: 5 });
+      zip.add(model);
+      const enc = new TextEncoder();
+      const FLUSH = 1 << 20;
+      let pending = '';
+      const emit = (s) => {
+        pending += s;
+        if (pending.length >= FLUSH) { model.push(enc.encode(pending), false); pending = ''; }
+      };
+      emitModelXml({ emit }, bodyResultsOrGeometry);
+      model.push(enc.encode(pending), true);
+      zip.end();
+    } catch (e) { reject(e); }
+  });
+}
+
 // Async export — doesn't block the thread
 export async function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf') {
-  const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
-  const zipped = await new Promise((resolve) => {
-    setTimeout(() => {
-      resolve(zipSync({
-        '[Content_Types].xml': [strToU8(CONTENT_TYPES_XML), { level: 5 }],
-        '_rels/.rels':         [strToU8(RELS_XML),           { level: 5 }],
-        '3D/3dmodel.model':    [modelBytes,                  { level: 5 }],
-      }));
-    }, 0);
-  });
-  
+  const zipped = await zip3MFStreaming(bodyResultsOrGeometry);
   await triggerDownload(zipped, filename, 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml');
 }
