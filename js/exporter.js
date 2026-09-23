@@ -247,7 +247,14 @@ function emitModelXml(emitter, bodyResultsOrGeometry) {
     emit(txAttr ? `<item objectid="1" transform="${txAttr}"/>\n` : '<item objectid="1"/>\n');
     emit('</build>\n</model>\n');
   }
-  return finish();
+}
+
+// Materialises the model XML as one buffer. Used by project save; export uses
+// zip3MFStreaming instead, which never builds the whole thing at once.
+function buildModelXmlBytes(bodyResultsOrGeometry) {
+  const emitter = makeEmitter();
+  emitModelXml(emitter, bodyResultsOrGeometry);
+  return emitter.finish();
 }
 
 const CONTENT_TYPES_XML =
