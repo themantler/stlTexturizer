@@ -417,19 +417,50 @@ export function remeshFlatRegions(geometry, opts = {}) {
   const regionTris = Array.from({ length: regionNX.length }, () => []);
   for (let t = 0; t < triCount; t++) if (regionId[t] >= 0) regionTris[regionId[t]].push(t);
 
-  // Output accumulators.
-  const outP=[], outN=[], outW=[], outParent=[];
-  const outRegion=[];   // debug: source region per output triangle (-1 = passthrough)
+  // Output accumulators: growable TYPED arrays, not plain JS arrays.
+  //
+  // outP and outN held 9 numbers per triangle each. A JS array of doubles costs
+  // 8 bytes per element and lives in the V8 HEAP — ~144 B/tri for the pair,
+  // on top of the Float32Arrays built from them at the end. A worker isolate has
+  // its own few-GB heap limit, and a Web Worker is a thread inside the RENDERER
+  // process: when it runs out, Chromium kills the renderer. The window goes
+  // white, DevTools reports it disconnected, and nothing is logged anywhere,
+  // because the process is simply gone. Typed storage is half the width and sits
+  // outside the heap.
+  const _guess = Math.max(1024, triCount);
+  let outCap = _guess;                       // capacity in TRIANGLES
+  let outP = new Float32Array(outCap * 9);
+  let outN = new Float32Array(outCap * 9);
+  let outW = ewv ? new Float32Array(outCap * 3) : null;
+  let outParent = parentIn ? new Int32Array(outCap) : null;
+  let outCount = 0;
+  const DEBUG_REGIONS = (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG);
+  const outRegion = DEBUG_REGIONS ? [] : null;   // debug only; costs 8 B/tri
   let _curRegion=-1;
+  const _growOut=()=>{
+    const cap2 = outCap * 2;
+    const p2 = new Float32Array(cap2*9); p2.set(outP); outP = p2;
+    const n2 = new Float32Array(cap2*9); n2.set(outN); outN = n2;
+    if (outW)      { const w2 = new Float32Array(cap2*3); w2.set(outW); outW = w2; }
+    if (outParent) { const a2 = new Int32Array(cap2);     a2.set(outParent); outParent = a2; }
+    outCap = cap2;
+  };
   const remeshed = new Uint8Array(regionNX.length);
   const pushTri=(p0,p1,p2,w0,w1,w2,par)=>{
     const e1x=p1[0]-p0[0],e1y=p1[1]-p0[1],e1z=p1[2]-p0[2], e2x=p2[0]-p0[0],e2y=p2[1]-p0[1],e2z=p2[2]-p0[2];
     let nx=e1y*e2z-e1z*e2y,ny=e1z*e2x-e1x*e2z,nz=e1x*e2y-e1y*e2x; const l=Math.hypot(nx,ny,nz)||1; nx/=l;ny/=l;nz/=l;
-    outP.push(p0[0],p0[1],p0[2],p1[0],p1[1],p1[2],p2[0],p2[1],p2[2]);
-    outN.push(nx,ny,nz,nx,ny,nz,nx,ny,nz);
-    if(ewv) outW.push(w0,w1,w2);
-    if(parentIn) outParent.push(par|0);
-    outRegion.push(_curRegion);
+    if (outCount >= outCap) _growOut();
+    const o = outCount*9;
+    outP[o]=p0[0]; outP[o+1]=p0[1]; outP[o+2]=p0[2];
+    outP[o+3]=p1[0]; outP[o+4]=p1[1]; outP[o+5]=p1[2];
+    outP[o+6]=p2[0]; outP[o+7]=p2[1]; outP[o+8]=p2[2];
+    outN[o]=nx; outN[o+1]=ny; outN[o+2]=nz;
+    outN[o+3]=nx; outN[o+4]=ny; outN[o+5]=nz;
+    outN[o+6]=nx; outN[o+7]=ny; outN[o+8]=nz;
+    if(outW){ const o3=outCount*3; outW[o3]=w0; outW[o3+1]=w1; outW[o3+2]=w2; }
+    if(outParent) outParent[outCount]=par|0;
+    if(outRegion) outRegion.push(_curRegion);
+    outCount++;
   };
 
   for (let r = 0; r < regionNX.length; r++) {
@@ -858,7 +889,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
     pushTri(P[0],P[1],P[2],W[0],W[1],W[2], parentIn ? parentIn[t] : 0);
   }
 
-  const nOut = outP.length / 9;
+  const nOut = outCount;
 
   // ── Restore parent-ordered output ──────────────────────────────────────────
   // Emission above is grouped by region (remeshed regions first, then
@@ -891,7 +922,7 @@ export function remeshFlatRegions(geometry, opts = {}) {
   }
 
   const out=new THREE.BufferGeometry();
-  if (typeof process !== 'undefined' && process.env && process.env.REMESH_DEBUG) {
+  if (outRegion) {
     const fReg = new Int32Array(nOut);
     for (let o = 0; o < nOut; o++) fReg[o] = outRegion[order2 ? order2[o] : o];
     out.userData.regionOf = fReg;
