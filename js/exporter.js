@@ -1,313 +1,238 @@
-import * as THREE from 'three';
-import { zipSync, strToU8 } from 'fflate';
+/*
+ * Copyright (c) 2026 CNCKitchen (Stefan Hermann) and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
 
+import { strToU8 } from 'fflate';
+import { QuantizedPointMap } from './meshIndex.js';
+import { zipChunks } from './zipStream.js';
+
+/**
+ * Trigger a browser download for a binary buffer.
+ * @param {ArrayBuffer|Uint8Array|Blob} buffer
+ * @param {string} filename
+ * @param {string} [mime]
+ */
 async function triggerDownload(buffer, filename, mime = 'application/octet-stream') {
-  if (window.electronAPI) {
+  // Electron build (preload.js exposes window.electronAPI): native Save
+  // dialog, written straight to disk.
+  if (typeof window !== 'undefined' && window.electronAPI) {
+    const ext = filename.split('.').pop().toLowerCase();
     const result = await window.electronAPI.showSaveDialog({
       defaultPath: filename,
       filters: [
-        { name: '3MF Files', extensions: ['3mf'] },
-        { name: 'STL Files', extensions: ['stl'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    })
+        ext === '3mf' ? { name: '3MF Files', extensions: ['3mf'] } : { name: 'STL Files', extensions: ['stl'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
     if (!result.canceled && result.filePath) {
-      await window.electronAPI.writeFile(result.filePath, buffer)
+      const bytes = buffer instanceof Blob ? new Uint8Array(await buffer.arrayBuffer()) : buffer;
+      await window.electronAPI.writeFile(result.filePath, bytes);
     }
-    return
+    return;
   }
-  // Fall back to browser download
-  const blob = new Blob([buffer], { type: mime })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement('a')
-  a.href=url; a.download=filename; a.style.display='none'
-  document.body.appendChild(a); a.click(); document.body.removeChild(a)
-  setTimeout(() => URL.revokeObjectURL(url), 10000)
+  const blob = buffer instanceof Blob ? buffer : new Blob([buffer], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-// ── STL exporter ─────────────────────────────────────────────────────────────
-
-export async function exportSTL(geometry, filename = 'textured.stl') {
+/**
+ * Fast binary STL exporter — writes directly from BufferGeometry arrays.
+ *
+ * Eliminates Three.js STLExporter overhead:
+ * - No Mesh/Material creation
+ * - No identity matrix multiplication per vertex
+ * - No redundant normal recomputation
+ * - Bulk Uint8Array.set() instead of per-float DataView calls
+ *
+ * @param {THREE.BufferGeometry} geometry  – non-indexed with position + normal
+ * @param {string} [filename]
+ */
+export function exportSTL(geometry, filename = 'textured.stl') {
   const posArr = geometry.attributes.position.array;
-  const norArr = geometry.attributes.normal ? geometry.attributes.normal.array : null;
+  const norArr = geometry.attributes.normal
+    ? geometry.attributes.normal.array
+    : null;
   const triCount = (posArr.length / 9) | 0;
-  const buffer = new ArrayBuffer(84 + 50 * triCount);
+
+  // Binary STL: 80-byte header + 4-byte tri count + 50 bytes per triangle
+  const bufLen = 84 + 50 * triCount;
+  const buffer = new ArrayBuffer(bufLen);
   const bytes  = new Uint8Array(buffer);
   const view   = new DataView(buffer);
+
+  // Header: 80 bytes (already zero-filled)
   view.setUint32(80, triCount, true);
+
+  // Reinterpret source arrays as raw bytes for bulk copy
   const posSrc = new Uint8Array(posArr.buffer, posArr.byteOffset, posArr.byteLength);
-  const norSrc = norArr ? new Uint8Array(norArr.buffer, norArr.byteOffset, norArr.byteLength) : null;
-  for (let i=0; i<triCount; i++) {
-    const dst=84+i*50, srcOff=i*36;
+  const norSrc = norArr
+    ? new Uint8Array(norArr.buffer, norArr.byteOffset, norArr.byteLength)
+    : null;
+
+  for (let i = 0; i < triCount; i++) {
+    const dst    = 84 + i * 50;
+    const srcOff = i * 36; // 9 floats * 4 bytes
+
     if (norSrc) {
-      bytes.set(norSrc.subarray(srcOff, srcOff+12), dst);
+      // Normal: copy first vertex normal (12 bytes) — flat shading, all 3 identical
+      bytes.set(norSrc.subarray(srcOff, srcOff + 12), dst);
     } else {
-      const b=i*9;
-      const ux=posArr[b+3]-posArr[b], uy=posArr[b+4]-posArr[b+1], uz=posArr[b+5]-posArr[b+2];
-      const vx=posArr[b+6]-posArr[b], vy=posArr[b+7]-posArr[b+1], vz=posArr[b+8]-posArr[b+2];
-      const nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
-      const len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
-      view.setFloat32(dst,   nx/len, true);
-      view.setFloat32(dst+4, ny/len, true);
-      view.setFloat32(dst+8, nz/len, true);
+      // Compute face normal from cross product
+      const b = i * 9;
+      const ux = posArr[b+3]-posArr[b], uy = posArr[b+4]-posArr[b+1], uz = posArr[b+5]-posArr[b+2];
+      const vx = posArr[b+6]-posArr[b], vy = posArr[b+7]-posArr[b+1], vz = posArr[b+8]-posArr[b+2];
+      const nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+      const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+      view.setFloat32(dst,     nx/len, true);
+      view.setFloat32(dst + 4, ny/len, true);
+      view.setFloat32(dst + 8, nz/len, true);
     }
-    bytes.set(posSrc.subarray(srcOff, srcOff+36), dst+12);
+
+    // Vertices: 36 bytes (3 vertices * 3 floats * 4 bytes)
+    bytes.set(posSrc.subarray(srcOff, srcOff + 36), dst + 12);
+
+    // Attribute byte count: 0 (already zero-filled)
   }
-  await triggerDownload(buffer, filename);
+
+  return triggerDownload(buffer, filename);
 }
 
-// ── 3MF body metadata ─────────────────────────────────────────────────────────
+/**
+ * 3MF exporter — builds a ZIP-packaged XML mesh in the Microsoft 3D
+ * Manufacturing core format (2015/02).
+ *
+ * Vertices are deduplicated (positions quantized to 4 decimals, i.e. 0.0001 mm
+ * tolerance) so the output is both smaller than binary STL and round-trippable
+ * by this project's own 3MF loader.
+ *
+ * Pass an array of { geometry, name, color } parts instead of one geometry
+ * to write each part as its own named object (multi-body 3MF); a part's
+ * `color` ("#RRGGBB") goes through an m:colorgroup so slicers keep it.
+ *
+ * @param {THREE.BufferGeometry|Array<{geometry, name?, color?}>} geometry
+ *   non-indexed with position attribute, or the parts
+ * @param {string} [filename]
+ * @param {() => boolean} [shouldAbort]
+ * @returns {Promise<void>}
+ */
+export async function export3MF(geometry, filename = 'textured.3mf', shouldAbort = () => false) {
+  if (shouldAbort()) throw new Error('Aborted');
+  const parts = (Array.isArray(geometry) ? geometry : [{ geometry }])
+    .filter(p => p.geometry.attributes.position.count > 0)
+    .map(p => ({ ...weldPart(p.geometry), name: p.name || '', color: p.color || null }));
 
-let _3mfBodies       = null;
-let _3mfCenterOffset = null;
+  // ── Static package files ─────────────────────────────────────────────────
+  const contentTypesXml =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n' +
+    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n' +
+    '</Types>\n';
 
-export function set3mfBodies(bodies, centerOffset) {
-  _3mfBodies       = (bodies && bodies.length > 0) ? bodies : null;
-  _3mfCenterOffset = centerOffset || null;
+  const relsXml =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n' +
+    '<Relationship Id="rel-1" Target="/3D/3dmodel.model" ' +
+    'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n' +
+    '</Relationships>\n';
+
+  // ── Zip and download ─────────────────────────────────────────────────────
+  const blob = await zipChunks([
+    ['[Content_Types].xml', [strToU8(contentTypesXml)]],
+    ['_rels/.rels', [strToU8(relsXml)]],
+    ['3D/3dmodel.model', modelChunks(parts)],
+  ], shouldAbort);
+  if (shouldAbort()) throw new Error('Aborted');
+  await triggerDownload(blob, filename);
 }
 
-export function clear3mfBodies() {
-  _3mfBodies       = null;
-  _3mfCenterOffset = null;
-}
-
-export function get3mfBodies() {
-  return _3mfBodies;
-}
-
-export function get3mfCenterOffset() {
-  return _3mfCenterOffset;
-}
-
-export function rotate3mfCenterOffset(quat) {
-  if (!_3mfCenterOffset) return;
-  const cv = new THREE.Vector3(
-    _3mfCenterOffset.x,
-    _3mfCenterOffset.y,
-    _3mfCenterOffset.z
-  ).applyQuaternion(quat);
-  _3mfCenterOffset.x = cv.x;
-  _3mfCenterOffset.y = cv.y;
-  _3mfCenterOffset.z = cv.z;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function fmt4(n) {
-  if (typeof n !== 'number' || !isFinite(n)) return '0';
-  let s = n.toFixed(4);
-  if (s.indexOf('.') !== -1) s = s.replace(/0+$/, '').replace(/\.$/, '');
-  return s;
-}
-
-function escapeXml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/"/g,'&quot;')
-    .replace(/'/g,'&apos;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function makeEmitter() {
-  const enc=new TextEncoder(), chunks=[];
-  let total=0, pending='';
-  const FLUSH=1<<20;
-  const flush=()=>{ if(!pending)return; const b=enc.encode(pending); chunks.push(b); total+=b.length; pending=''; };
-  const emit=(s)=>{ pending+=s; if(pending.length>=FLUSH)flush(); };
-  const finish=()=>{ flush(); const out=new Uint8Array(total); let off=0; for(const b of chunks){out.set(b,off);off+=b.length;} return out; };
-  return {emit,finish};
-}
-
-function emitObjectXml(emitter, geometry, objectId, name, colorGroupId=null, colorIndex=null) {
-  const { emit } = emitter;
-  const posArr   = geometry.attributes.position.array;
+function weldPart(geometry) {
+  const posArr = geometry.attributes.position.array;
   const triCount = (posArr.length / 9) | 0;
-  if (triCount === 0) return;
 
-  const vertCount_max = triCount * 3;
-  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
-  const hashTable  = new Int32Array(HASH_SIZE).fill(-1);
-  const hashNext   = new Int32Array(vertCount_max).fill(-1);
-  const hashX      = new Float32Array(vertCount_max);
-  const hashY      = new Float32Array(vertCount_max);
-  const hashZ      = new Float32Array(vertCount_max);
-  const hashIdx    = new Int32Array(vertCount_max);
-  let   slotCount  = 0;
-  let   vertCount  = 0;
-  const QUANT_LOCAL = 1e4;
-  const triIdx = new Uint32Array(triCount * 3);
+  // ── Deduplicate vertices ─────────────────────────────────────────────────
+  // Weld on the 1e4 grid (0.0001 mm cells), matching the 4-decimal precision
+  // the coordinates are written with below — safely below the resolution of
+  // any FDM/SLA printer and far tighter than float32 rounding noise from the
+  // displacement pipeline. The pipeline snaps coordinates onto this exact
+  // grid in resolveTJunctions before export, so welding here only merges
+  // bit-identical (or grid-identical) points.
+  const indexMap  = new QuantizedPointMap(1e4, Math.min(triCount * 3, 1 << 22));
+  const uniqueXYZ = [];   // flat [x,y,z,x,y,z,...]
+  const triIdx    = new Uint32Array(triCount * 3);
 
   for (let i = 0; i < triCount; i++) {
     for (let j = 0; j < 3; j++) {
       const b = i * 9 + j * 3;
-      const x = posArr[b], y = posArr[b+1], z = posArr[b+2];
-      if (!isFinite(x) || !isFinite(y) || !isFinite(z))
-        throw new Error(`Non-finite vertex in body ${objectId} tri ${i} vert ${j}: (${x},${y},${z})`);
-      const qx = Math.round(x * QUANT_LOCAL);
-      const qy = Math.round(y * QUANT_LOCAL);
-      const qz = Math.round(z * QUANT_LOCAL);
-      const h  = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
-      let found = -1;
-      let probe = hashTable[h];
-      while (probe !== -1) {
-        if (Math.round(hashX[probe] * QUANT_LOCAL) === qx &&
-            Math.round(hashY[probe] * QUANT_LOCAL) === qy &&
-            Math.round(hashZ[probe] * QUANT_LOCAL) === qz) {
-          found = probe; break;
-        }
-        probe = hashNext[probe];
-      }
-      if (found === -1) {
-        hashX[slotCount]    = x;
-        hashY[slotCount]    = y;
-        hashZ[slotCount]    = z;
-        hashIdx[slotCount]  = vertCount;
-        hashNext[slotCount] = hashTable[h];
-        hashTable[h]        = slotCount;
-        triIdx[i * 3 + j]   = vertCount;
-        slotCount++;
-        vertCount++;
-      } else {
-        triIdx[i * 3 + j] = hashIdx[found];
-      }
+      const x = posArr[b];
+      const y = posArr[b + 1];
+      const z = posArr[b + 2];
+      const idx = indexMap.getOrSet(x, y, z, uniqueXYZ.length / 3);
+      if (indexMap.inserted) uniqueXYZ.push(x, y, z);
+      triIdx[i * 3 + j] = idx;
     }
   }
 
-  const vx = new Float32Array(vertCount);
-  const vy = new Float32Array(vertCount);
-  const vz = new Float32Array(vertCount);
-  for (let s = 0; s < slotCount; s++) {
-    const idx = hashIdx[s];
-    vx[idx] = hashX[s];
-    vy[idx] = hashY[s];
-    vz[idx] = hashZ[s];
-  }
-
-  const namePart = name ? ` name="${escapeXml(name)}"` : '';
-  const colorPart = (colorGroupId !== null && colorIndex !== null)
-    ? ` pid="${colorGroupId}" pindex="${colorIndex}"`
-    : '';
-  emit(`<object id="${objectId}"${namePart}${colorPart} type="model">\n<mesh>\n<vertices>\n`);
-  for (let i = 0; i < vertCount; i++) {
-    emit('<vertex x="' + fmt4(vx[i]) + '" y="' + fmt4(vy[i]) + '" z="' + fmt4(vz[i]) + '"/>\n');
-  }
-  emit('</vertices>\n<triangles>\n');
-  for (let i = 0; i < triCount; i++) {
-    const b = i * 3;
-    emit('<triangle v1="' + triIdx[b] + '" v2="' + triIdx[b+1] + '" v3="' + triIdx[b+2] + '"/>\n');
-  }
-  emit('</triangles>\n</mesh>\n</object>\n');
+  return { vertices: uniqueXYZ, indices: triIdx };
 }
 
-function buildTransformAttr(matrix, centerOffset) {
-  if (!matrix || !matrix.isMatrix4 || !matrix.elements || matrix.elements.length < 16) return null;
-  const e=matrix.elements;
-  const m00=e[0],m10=e[1],m20=e[2];
-  const m01=e[4],m11=e[5],m21=e[6];
-  const m02=e[8],m12=e[9],m22=e[10];
-  let tx=e[12],ty=e[13],tz=e[14];
-  if (centerOffset) {
-    tx+=isFinite(centerOffset.x)?centerOffset.x:0;
-    ty+=isFinite(centerOffset.y)?centerOffset.y:0;
-    tz+=isFinite(centerOffset.z)?centerOffset.z:0;
+// Generate bounded XML chunks directly into the compressor. Keeping all XML
+// chunks and then concatenating them used two full uncompressed mesh copies.
+function* modelChunks(parts) {
+  const enc = new TextEncoder();
+  const threshold = 1 << 20;
+  const hasColors = parts.some(p => p.color);
+  let pending = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<model unit="millimeter" xml:lang="en-US" ' +
+    'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"' +
+    (hasColors ? ' xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"' : '') +
+    '>\n<resources>\n';
+  // One colorgroup per part, ids after the object ids (1..n).
+  if (hasColors) {
+    parts.forEach((p, i) => {
+      pending += `<m:colorgroup id="${parts.length + 1 + i}">\n<m:color color="${escapeXml(p.color || '#A0A0A0')}"/>\n</m:colorgroup>\n`;
+    });
   }
-  const eps=1e-5;
-  if (Math.abs(m00-1)<eps&&Math.abs(m10)<eps&&Math.abs(m20)<eps&&
-      Math.abs(m01)<eps&&Math.abs(m11-1)<eps&&Math.abs(m21)<eps&&
-      Math.abs(m02)<eps&&Math.abs(m12)<eps&&Math.abs(m22-1)<eps&&
-      Math.abs(tx)<eps&&Math.abs(ty)<eps&&Math.abs(tz)<eps) return null;
-  return [m00,m01,m02,m10,m11,m12,m20,m21,m22,tx,ty,tz]
-    .map(v=>parseFloat((isFinite(v)?v:0).toFixed(6))).join(' ');
-}
-
-// ── 3MF XML builder ───────────────────────────────────────────────────────────
-
-function buildModelXmlBytes(bodyResultsOrGeometry) {
-  const emitter = makeEmitter();
-  const { emit, finish } = emitter;
-  emit(
-    '<?xml version="1.0" encoding="UTF-8"?>\n'+
-    '<model unit="millimeter" xml:lang="en-US" '+
-    'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '+
-    'xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">\n'+
-    '<resources>\n'
-  );
-  const isMultiBody = Array.isArray(bodyResultsOrGeometry) && bodyResultsOrGeometry.length > 0;
-  if (isMultiBody) {
-    const bodyResults = bodyResultsOrGeometry;
-    const nonEmpty = bodyResults.filter(b => (b.geometry.attributes.position.array.length/9|0) > 0);
-
-    // Write colorgroup if any body has color data
-    const colorsToWrite = nonEmpty.map(b => b.color || null);
-    const hasColors = colorsToWrite.some(c => c !== null);
-    const colorGroupIds = [];
-    if (hasColors) {
-      for (let i = 0; i < nonEmpty.length; i++) {
-        const cgId = nonEmpty.length + 1 + i;
-        colorGroupIds.push(cgId);
-        const c = colorsToWrite[i] || '#A0A0A0';
-        emit(`<m:colorgroup id="${cgId}">\n<m:color color="${c}"/>\n</m:colorgroup>\n`);
-      }
+  const fmt = (n) => {
+    // 4 decimals matches the dedup precision; strip trailing zeros and ".".
+    let s = n.toFixed(4);
+    if (s.indexOf('.') !== -1) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return s;
+  };
+  for (let o = 0; o < parts.length; o++) {
+    const { vertices, indices, name } = parts[o];
+    pending += `<object id="${o + 1}"` +
+      (name ? ` name="${escapeXml(name)}"` : '') +
+      (hasColors ? ` pid="${parts.length + 1 + o}" pindex="0"` : '') +
+      ' type="model">\n<mesh>\n<vertices>\n';
+    for (let i = 0; i < vertices.length; i += 3) {
+      // Preserve the existing four-decimal coordinate representation.
+      pending += `<vertex x="${fmt(vertices[i])}" y="${fmt(vertices[i+1])}" z="${fmt(vertices[i+2])}"/>\n`;
+      if (pending.length >= threshold) { yield enc.encode(pending); pending = ''; }
     }
-    for (let i=0; i<nonEmpty.length; i++) {
-      const cgId = hasColors ? colorGroupIds[i] : null;
-      emitObjectXml(emitter, nonEmpty[i].geometry, i+1, nonEmpty[i].name||'', cgId, cgId !== null ? 0 : null);
+    pending += '</vertices>\n<triangles>\n';
+    for (let i = 0; i < indices.length; i += 3) {
+      pending += `<triangle v1="${indices[i]}" v2="${indices[i+1]}" v3="${indices[i+2]}"/>\n`;
+      if (pending.length >= threshold) { yield enc.encode(pending); pending = ''; }
     }
-    emit('</resources>\n<build>\n');
-    for (let i=0; i<nonEmpty.length; i++) {
-      const txAttr = buildTransformAttr(nonEmpty[i].matrix, _3mfCenterOffset);
-      emit(txAttr
-        ? `<item objectid="${i+1}" transform="${txAttr}"/>\n`
-        : `<item objectid="${i+1}"/>\n`);
-    }
-    emit('</build>\n</model>\n');
-  } else {
-    const geometry = bodyResultsOrGeometry;
-    const name   = (_3mfBodies && _3mfBodies.length===1) ? (_3mfBodies[0].name||'') : '';
-    const matrix = (_3mfBodies && _3mfBodies.length===1) ? _3mfBodies[0].matrix : null;
-    emitObjectXml(emitter, geometry, 1, name);
-    emit('</resources>\n<build>\n');
-    const txAttr = buildTransformAttr(matrix, _3mfCenterOffset);
-    emit(txAttr ? `<item objectid="1" transform="${txAttr}"/>\n` : '<item objectid="1"/>\n');
-    emit('</build>\n</model>\n');
+    pending += '</triangles>\n</mesh>\n</object>\n';
   }
-  return finish();
+  pending += '</resources>\n<build>\n';
+  for (let o = 0; o < parts.length; o++) pending += `<item objectid="${o + 1}"/>\n`;
+  pending += '</build>\n</model>\n';
+  yield enc.encode(pending);
 }
 
-const CONTENT_TYPES_XML =
-  '<?xml version="1.0" encoding="UTF-8"?>\n'+
-  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'+
-  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'+
-  '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n'+
-  '</Types>\n';
-
-const RELS_XML =
-  '<?xml version="1.0" encoding="UTF-8"?>\n'+
-  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'+
-  '<Relationship Id="rel-1" Target="/3D/3dmodel.model" '+
-  'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'+
-  '</Relationships>\n';
-
-// Returns zipped 3MF bytes — used by project save
-export function build3MFBytes(bodyResultsOrGeometry) {
-  const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
-  return zipSync({
-    '[Content_Types].xml': strToU8(CONTENT_TYPES_XML),
-    '_rels/.rels':         strToU8(RELS_XML),
-    '3D/3dmodel.model':    modelBytes,
-  }, { level: 0 });
-}
-
-// Async export — doesn't block the thread
-export async function export3MF(bodyResultsOrGeometry, filename = 'textured.3mf') {
-  const modelBytes = buildModelXmlBytes(bodyResultsOrGeometry);
-  const zipped = await new Promise((resolve) => {
-    setTimeout(() => {
-      resolve(zipSync({
-        '[Content_Types].xml': [strToU8(CONTENT_TYPES_XML), { level: 5 }],
-        '_rels/.rels':         [strToU8(RELS_XML),           { level: 5 }],
-        '3D/3dmodel.model':    [modelBytes,                  { level: 5 }],
-      }));
-    }, 0);
-  });
-  
-  await triggerDownload(zipped, filename, 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml');
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
