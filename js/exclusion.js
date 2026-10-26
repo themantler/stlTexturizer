@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 CNCKitchen (Stefan Hermann) and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 /**
  * exclusion.js — per-face exclusion masking
  *
@@ -11,10 +16,9 @@
  */
 
 import * as THREE from 'three';
+import { QuantizedPointMap } from './meshIndex.js';
 
 const QUANT = 1e4;
-const quantKey = (x, y, z) =>
-  `${Math.round(x * QUANT)}_${Math.round(y * QUANT)}_${Math.round(z * QUANT)}`;
 
 // ── Adjacency & centroids ─────────────────────────────────────────────────────
 
@@ -26,7 +30,9 @@ const quantKey = (x, y, z) =>
  *   adjacency:   Array<Array<{neighbor:number, angle:number}>>,
  *   centroids:   Float32Array   (triCount × 3, geometry-local centroid per triangle),
  *   boundRadii:  Float32Array   (triCount, max vertex-to-centroid distance per triangle),
- *   faceNormals: Float32Array   (triCount × 3, geometry-local unit face normal per triangle)
+ *   faceNormals: Float32Array   (triCount × 3, geometry-local unit face normal per triangle),
+ *   vertId:      Uint32Array    (triCount × 3, welded vertex id per corner),
+ *   vertCount:   number         (welded vertex count)
  * }}
  */
 export function buildAdjacency(geometry) {
@@ -36,7 +42,8 @@ export function buildAdjacency(geometry) {
   // Pre-allocate face normals, centroids, and per-triangle bounding radii
   const faceNormals = new Float32Array(triCount * 3);
   const centroids   = new Float32Array(triCount * 3);
-  const boundRadii  = new Float32Array(triCount);
+  const boundRadii  = new Float32Array(triCount); // max vertex-to-centroid distance
+
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
@@ -49,12 +56,15 @@ export function buildAdjacency(geometry) {
     vA.fromBufferAttribute(posAttr, i);
     vB.fromBufferAttribute(posAttr, i + 1);
     vC.fromBufferAttribute(posAttr, i + 2);
+
     e1.subVectors(vB, vA);
     e2.subVectors(vC, vA);
     fn.crossVectors(e1, e2).normalize();
+
     faceNormals[i]     = fn.x;
     faceNormals[i + 1] = fn.y;
     faceNormals[i + 2] = fn.z;
+
     const cx = (vA.x + vB.x + vC.x) / 3;
     const cy = (vA.y + vB.y + vC.y) / 3;
     const cz = (vA.z + vB.z + vC.z) / 3;
@@ -67,92 +77,67 @@ export function buildAdjacency(geometry) {
     boundRadii[t] = Math.sqrt(Math.max(dA, dB, dC));
   }
 
-  // Vertex dedup using numeric spatial hash instead of string-keyed Map.
-  // This avoids Map size limits and string allocation overhead for large meshes.
-  const vertCount = triCount * 3;
-  const HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(vertCount * 2)));
-  const hashTable = new Int32Array(HASH_SIZE).fill(-1);
-  const hashNext  = new Int32Array(vertCount).fill(-1);
-  const vertId    = new Uint32Array(vertCount);
-  // Cache quantized coords to avoid repeated attribute lookups in probe chain
-  const qxArr = new Int32Array(vertCount);
-  const qyArr = new Int32Array(vertCount);
-  const qzArr = new Int32Array(vertCount);
+  // Build edge → triangle list (two triangles share an edge iff they share two
+  // vertex positions after quantization-based deduplication).
+  // Vertex-dedup pass: assign a numeric ID to each unique quantised position.
+  const posToId = new QuantizedPointMap(QUANT, Math.min(triCount * 3, 1 << 22));
   let nextId = 0;
-
-  for (let i = 0; i < vertCount; i++) {
-    const qx = Math.round(posAttr.getX(i) * QUANT);
-    const qy = Math.round(posAttr.getY(i) * QUANT);
-    const qz = Math.round(posAttr.getZ(i) * QUANT);
-    qxArr[i] = qx; qyArr[i] = qy; qzArr[i] = qz;
-    const h = (((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) >>> 0) & (HASH_SIZE - 1);
-    let found = -1;
-    let probe = hashTable[h];
-    while (probe !== -1) {
-      if (qxArr[probe] === qx && qyArr[probe] === qy && qzArr[probe] === qz) {
-        found = probe; break;
-      }
-      probe = hashNext[probe];
-    }
-    if (found === -1) {
-      hashNext[i] = hashTable[h];
-      hashTable[h] = i;
-      vertId[i] = nextId++;
-    } else {
-      vertId[i] = vertId[found];
-    }
+  const vertId = new Uint32Array(triCount * 3);
+  for (let i = 0; i < triCount * 3; i++) {
+    const id = posToId.getOrSet(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i), nextId);
+    if (posToId.inserted) nextId++;
+    vertId[i] = id;
   }
-  
-  // Build edge map using numeric keys — no string allocations
-  // numEdgeKey produces a unique number for each undirected edge
+  // nextId^2 < MAX_SAFE_INTEGER → safe up to ~94M unique vertices
   const numEdgeKey = (a, b) => a < b ? a * nextId + b : b * nextId + a;
-  // Build edge map using typed array hash to avoid Map size limits
-  const EDGE_HASH_SIZE = Math.max(1 << 16, 1 << Math.ceil(Math.log2(triCount * 3 * 2)));
-  const edgeHashTable = new Int32Array(EDGE_HASH_SIZE).fill(-1);
-  const edgeHashNext  = new Int32Array(triCount * 3).fill(-1);
-  const edgeHashKey   = new Float64Array(triCount * 3);
-  const edgeHashTriA  = new Int32Array(triCount * 3).fill(-1);
-  const edgeHashTriB  = new Int32Array(triCount * 3).fill(-1);
-  let edgeSlot = 0;
-  const edgePairs = [0, 1, 0, 2, 1, 2];
 
+  const edgeMap = new Map();
+  const edgePairs = [0, 1, 0, 2, 1, 2]; // vertex-index pairs within triangle
+
+  // A triangle whose corners the weld merged (an edge shorter than the grid)
+  // has no real edges. Kept in, its doubled edge reads as non-manifold and
+  // it splits off a phantom shell — "2 non-manifold, 2 shells" on a closed
+  // CAD solid (#109) — and it steals the link between its two real neighbours.
+  const collapsed = new Uint8Array(triCount);
   for (let t = 0; t < triCount; t++) {
     const base = t * 3;
+    const a = vertId[base], b = vertId[base + 1], c = vertId[base + 2];
+    if (a === b || b === c || a === c) { collapsed[t] = 1; continue; }
     for (let e = 0; e < 6; e += 2) {
-      const a = vertId[base + edgePairs[e]];
-      const b = vertId[base + edgePairs[e + 1]];
-      const ek = a < b ? a * nextId + b : b * nextId + a;
-      const h = (Math.abs(Math.round(ek)) * 2654435761) >>> 0 & (EDGE_HASH_SIZE - 1);
-      let found = -1;
-      let probe = edgeHashTable[h];
-      while (probe !== -1) {
-        if (edgeHashKey[probe] === ek) { found = probe; break; }
-        probe = edgeHashNext[probe];
-      }
-      if (found === -1) {
-        edgeHashKey[edgeSlot]  = ek;
-        edgeHashTriA[edgeSlot] = t;
-        edgeHashTriB[edgeSlot] = -1;
-        edgeHashNext[edgeSlot] = edgeHashTable[h];
-        edgeHashTable[h]       = edgeSlot;
-        edgeSlot++;
-      } else if (edgeHashTriB[found] === -1) {
-        edgeHashTriB[found] = t;
-      }
-      // more than 2 triangles sharing an edge = non-manifold, ignore extras
+      const ek = numEdgeKey(vertId[base + edgePairs[e]], vertId[base + edgePairs[e + 1]]);
+      const entry = edgeMap.get(ek);
+      if (entry) entry.push(t);
+      else edgeMap.set(ek, [t]);
     }
   }
 
-  // Convert to adjacency list
+  // Convert edge map to adjacency list with per-edge dihedral angle
+  // Array from buildAdjacency
   const adjacency = new Array(triCount);
   for (let t = 0; t < triCount; t++) adjacency[t] = [];
+
   let openEdgeCount = 0;
   let nonManifoldEdgeCount = 0;
 
-  for (let s = 0; s < edgeSlot; s++) {
-    const a = edgeHashTriA[s];
-    const b = edgeHashTriB[s];
-    if (b === -1) { openEdgeCount++; continue; }
+  // Shells via union-find over EVERY face on an edge. The adjacency below
+  // links only the first two faces of a non-manifold edge (what bucket fill
+  // wants), so counting shells on it split off phantom shells (#109, #125).
+  const shellRoot = new Int32Array(triCount);
+  for (let t = 0; t < triCount; t++) shellRoot[t] = t;
+  const findRoot = (x) => {
+    while (shellRoot[x] !== x) { shellRoot[x] = shellRoot[shellRoot[x]]; x = shellRoot[x]; }
+    return x;
+  };
+
+  for (const [, tris] of edgeMap) {
+    const r0 = findRoot(tris[0]);
+    for (let i = 1; i < tris.length; i++) {
+      const r = findRoot(tris[i]);
+      if (r !== r0) shellRoot[r] = r0;
+    }
+    if (tris.length === 1) { openEdgeCount++; continue; }
+    if (tris.length > 2) nonManifoldEdgeCount++;
+    const [a, b] = tris;
     const nAx = faceNormals[a * 3], nAy = faceNormals[a * 3 + 1], nAz = faceNormals[a * 3 + 2];
     const nBx = faceNormals[b * 3], nBy = faceNormals[b * 3 + 1], nBz = faceNormals[b * 3 + 2];
     const dot      = Math.max(-1, Math.min(1, nAx * nBx + nAy * nBy + nAz * nBz));
@@ -161,7 +146,19 @@ export function buildAdjacency(geometry) {
     adjacency[b].push({ neighbor: a, angle: angleDeg });
   }
 
-  return { adjacency, centroids, boundRadii, faceNormals, openEdgeCount, nonManifoldEdgeCount };
+  // 0-based shell index per triangle; weld-collapsed triangles get -1 and
+  // don't count as shells of their own.
+  // (A collapsed triangle has no edges, so it is never a root of a real shell.)
+  const shellId = new Int32Array(triCount).fill(-1);
+  let shellCount = 0;
+  for (let t = 0; t < triCount; t++) {
+    if (!collapsed[t] && findRoot(t) === t) shellId[t] = shellCount++;
+  }
+  for (let t = 0; t < triCount; t++) {
+    if (!collapsed[t]) shellId[t] = shellId[findRoot(t)];
+  }
+
+  return { adjacency, centroids, boundRadii, faceNormals, openEdgeCount, nonManifoldEdgeCount, shellCount, shellId, vertId, vertCount: nextId };
 }
 
 // ── Bucket fill ───────────────────────────────────────────────────────────────
@@ -264,9 +261,13 @@ export function buildExclusionOverlayGeo(geometry, faceSet, invert = false) {
  *
  * @param {THREE.BufferGeometry} geometry
  * @param {Set<number>}          excludedFaces
+ * @param {boolean}              [invert=false]  include-only mode
+ * @param {Uint8Array|null}      [softFaces]     include-only mode: faces touched
+ *   by soft-brush paint (softMask.js) are partially textured, so they must not
+ *   be hard-excluded either
  * @returns {Float32Array}  length = geometry.attributes.position.count
  */
-export function buildFaceWeights(geometry, excludedFaces, invert = false) {
+export function buildFaceWeights(geometry, excludedFaces, invert = false, softFaces = null) {
   const count   = geometry.attributes.position.count;
   const weights = new Float32Array(count); // default 0.0 (included)
   if (invert) {
@@ -276,6 +277,14 @@ export function buildFaceWeights(geometry, excludedFaces, invert = false) {
       weights[t * 3]     = 0.0;
       weights[t * 3 + 1] = 0.0;
       weights[t * 3 + 2] = 0.0;
+    }
+    if (softFaces) {
+      for (let t = 0; t < softFaces.length; t++) {
+        if (!softFaces[t]) continue;
+        weights[t * 3]     = 0.0;
+        weights[t * 3 + 1] = 0.0;
+        weights[t * 3 + 2] = 0.0;
+      }
     }
   } else {
     for (const t of excludedFaces) {
